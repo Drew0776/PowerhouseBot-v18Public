@@ -1299,13 +1299,18 @@ export function startAutoTrader() {
 
 // V17 ISSUE #1: Persist state to SQLite so restarts don't wipe everything
 // Task #16: openPositions now included so positions survive server restarts
+// Bug 4 fix: use a safe replacer to strip non-JSON-safe values; never throw to caller
+function safeReplacer(_key: string, value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "function" || typeof value === "symbol") return undefined;
+  if (typeof value === "number" && !isFinite(value)) return null;
+  return value;
+}
+
 function persistState() {
   try {
     const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
-    sqlite.prepare(`
-      INSERT OR REPLACE INTO engine_state (id, state_json, updated_at)
-      VALUES (1, ?, ?)
-    `).run(JSON.stringify({
+    const payload = {
       isRunning: state.isRunning,
       totalTicks: state.totalTicks,
       totalTrades: state.totalTrades,
@@ -1316,12 +1321,17 @@ function persistState() {
       totalSlippageCost: state.totalSlippageCost,
       roiPct: state.roiPct,
       wins, losses, totalWinAmt, totalLossAmt,
-      pnlHistory: pnlHistory.slice(-200), // keep last 200 for Sharpe
+      pnlHistory: pnlHistory.slice(-200),
       dailyStartValue: dailyStart.value,
       dailyStartTick: dailyStart.tick,
       dailyStartDateKey: dailyStart.dateKey,
-      openPositions: state.openPositions,  // Task #16: persist open positions array
-    }), new Date().toISOString());
+      openPositions: state.openPositions,
+    };
+    const json = JSON.stringify(payload, safeReplacer);
+    sqlite.prepare(`
+      INSERT OR REPLACE INTO engine_state (id, state_json, updated_at)
+      VALUES (1, ?, ?)
+    `).run(json, new Date().toISOString());
   } catch (_e) { /* non-fatal — state still in memory */ }
 }
 
