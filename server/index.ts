@@ -64,10 +64,10 @@ app.use((req, res, next) => {
 
   // V19: Auto-resume — if the engine was running before the last server restart, pick back up
   try {
-    const { sqlite } = await import("./storage") as unknown as { sqlite: import("better-sqlite3").Database };
-    const row = (sqlite as any).prepare("SELECT state_json FROM engine_state WHERE id = 1").get() as { state_json: string } | undefined;
-    if (row) {
-      const s = JSON.parse(row.state_json);
+    const { getEngineStateJson } = await import("./storage");
+    const json = getEngineStateJson();
+    if (json) {
+      const s = JSON.parse(json);
       if (s.isRunning === true) {
         const { startAutoTrader } = await import("./auto-trader");
         startAutoTrader();

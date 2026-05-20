@@ -28,7 +28,7 @@ interface StockInfo {
   pipSize?: number;
 }
 
-const STOCK_INFO: Record<string, StockInfo> = {
+export const STOCK_INFO: Record<string, StockInfo> = {
   // AI & Tech (existing 15)
   NVDA: { name: "NVIDIA Corp", price: 177, volatility: 0.028, bias: 0.003, category: "ai-tech", sector: "Semiconductors", marketCapBillions: 4350, floatMillions: 24400, shortInterestBase: 1.2, institutionalOwnership: 65, beta: 1.7 },
   MSFT: { name: "Microsoft Corp", price: 373, volatility: 0.015, bias: 0.001, category: "ai-tech", sector: "Software", marketCapBillions: 2780, floatMillions: 7430, shortInterestBase: 0.8, institutionalOwnership: 72, beta: 0.9 },
@@ -597,30 +597,34 @@ export function generateAllStocks(): StockData[] {
 
 // Scanner scoring functions
 export function scorePennyStock(s: StockData): number {
-  const floatScore = s.floatShares < 10 ? 100 : s.floatShares < 50 ? 70 : s.floatShares < 200 ? 40 : 20;
-  const shortScore = Math.min(100, s.shortInterestPct * 4);
-  const volScore = Math.min(100, s.volumeSpikeRatio * 30);
-  const catScore = s.catalystScore;
-  const momScore = s.momentumScore;
+  const float = s.floatShares ?? 999;
+  const floatScore = float < 10 ? 100 : float < 50 ? 70 : float < 200 ? 40 : 20;
+  const shortScore = Math.min(100, (s.shortInterestPct ?? 0) * 4);
+  const volScore = Math.min(100, (s.volumeSpikeRatio ?? 0) * 30);
+  const catScore = s.catalystScore ?? 50;
+  const momScore = s.momentumScore ?? 50;
   return Math.round(floatScore * 0.15 + shortScore * 0.20 + volScore * 0.20 + catScore * 0.25 + momScore * 0.20);
 }
 
 export function scoreMomentum(s: StockData): number {
-  const rsiScore = s.rsi > 50 ? Math.min(100, (s.rsi - 30) * 1.5) : Math.max(0, s.rsi * 1.2);
-  const macdScore = s.macdSignal === 20 ? 80 : s.macdSignal === 0 ? 50 : 20;
-  const maScore = s.maAlignment === 30 ? 90 : s.maAlignment === 0 ? 50 : 15;
-  const volScore = Math.min(100, s.volumeSpikeRatio * 30);
-  const bollScore = s.bollingerPosition > 70 ? 80 : s.bollingerPosition > 40 ? 60 : 30;
-  const sentScore = s.sentimentScore;
+  const rsi = s.rsi ?? 50;
+  const rsiScore = rsi > 50 ? Math.min(100, (rsi - 30) * 1.5) : Math.max(0, rsi * 1.2);
+  const macdScore = (s.macdSignal ?? 0) === 20 ? 80 : (s.macdSignal ?? 0) === 0 ? 50 : 20;
+  const maScore = (s.maAlignment ?? 0) === 30 ? 90 : (s.maAlignment ?? 0) === 0 ? 50 : 15;
+  const volScore = Math.min(100, (s.volumeSpikeRatio ?? 0) * 30);
+  const boll = s.bollingerPosition ?? 50;
+  const bollScore = boll > 70 ? 80 : boll > 40 ? 60 : 30;
+  const sentScore = s.sentimentScore ?? 50;
   return Math.round(rsiScore * 0.15 + macdScore * 0.20 + maScore * 0.20 + volScore * 0.15 + bollScore * 0.15 + sentScore * 0.15);
 }
 
 export function scoreSqueeze(s: StockData): number {
-  const shortScore = Math.min(100, s.shortInterestPct * 3);
-  const dtcScore = Math.min(100, s.daysToCover * 15);
-  const volScore = Math.min(100, s.volumeSpikeRatio * 30);
-  const floatScore = s.floatShares < 50 ? 90 : s.floatShares < 200 ? 60 : s.floatShares < 1000 ? 30 : 10;
-  const catScore = s.catalystScore;
+  const shortScore = Math.min(100, (s.shortInterestPct ?? 0) * 3);
+  const dtcScore = Math.min(100, (s.daysToCover ?? 0) * 15);
+  const volScore = Math.min(100, (s.volumeSpikeRatio ?? 0) * 30);
+  const float = s.floatShares ?? 999;
+  const floatScore = float < 50 ? 90 : float < 200 ? 60 : float < 1000 ? 30 : 10;
+  const catScore = s.catalystScore ?? 50;
   return Math.round(shortScore * 0.30 + dtcScore * 0.25 + volScore * 0.20 + floatScore * 0.15 + catScore * 0.10);
 }
 

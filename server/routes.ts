@@ -15,6 +15,8 @@ import {
   calcProfitPerGrid,
   suggestGridCount,
   autoRange,
+  startGridBotLoop,
+  stopGridBotLoop,
 } from "./grid-engine";
 import {
   autoTraderTick,
@@ -47,7 +49,8 @@ async function sendTelegramAlert(message: string): Promise<void> {
 export { sendTelegramAlert };
 
 // Alpaca feed
-import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed } from "./alpaca";
+import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed, setAlpacaPriceCallback } from "./alpaca";
+import { pushMtfBar } from "./auto-trader";
 import { z } from "zod";
 
 // Deterministic random for market status & options flow
@@ -650,8 +653,26 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/universe/count — total number of instruments tracked
+  app.get("/api/universe/count", (_req, res) => {
+    try {
+      res.json({ count: getStockData().length });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to get universe count" });
+    }
+  });
+
+  // Bug 7 fix: Push Alpaca prices into MTF history for all tickers, not just traded ones.
+  // This ensures momentum scoring works correctly for all 181 tickers from startup.
+  setAlpacaPriceCallback(pushMtfBar);
+
   // Auto-start the Alpaca price feed on server init so prices are live immediately
   startAlpacaFeed();
+
+  // Bug 5 fix: Resume background tick loops for any grid bots that were active at shutdown
+  for (const bot of getAllGridBots().filter(b => b.status === "active")) {
+    startGridBotLoop(bot.id);
+  }
 
   return httpServer;
 }

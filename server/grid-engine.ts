@@ -86,6 +86,24 @@ export function sharesPerLevel(totalInvestment: number, count: number, entryPric
   return Math.round((totalInvestment / count / entryPrice) * 10000) / 10000;
 }
 
+// ── Per-bot background tick intervals ──────────────────────────────────────────
+const _botIntervals = new Map<number, ReturnType<typeof setInterval>>();
+
+/** Start automatic background ticking for a bot (every 3 s) */
+export function startGridBotLoop(id: number): void {
+  if (_botIntervals.has(id)) return;
+  const interval = setInterval(() => {
+    try { simulateGridTick(id); } catch (_e) { /* non-fatal */ }
+  }, 3000);
+  _botIntervals.set(id, interval);
+}
+
+/** Stop the background tick loop for a bot */
+export function stopGridBotLoop(id: number): void {
+  const interval = _botIntervals.get(id);
+  if (interval) { clearInterval(interval); _botIntervals.delete(id); }
+}
+
 /** Create a new grid bot */
 export function createGridBot(params: {
   ticker: string;
@@ -107,6 +125,7 @@ export function createGridBot(params: {
     createdAt: new Date().toISOString(),
   }).returning().get();
 
+  startGridBotLoop(bot.id);
   return bot;
 }
 
@@ -130,6 +149,7 @@ export function getGridOrders(botId: number): GridOrder[] {
 
 /** Stop a grid bot */
 export function stopGridBot(id: number): GridBot | undefined {
+  stopGridBotLoop(id);
   return gridDb.update(gridBots)
     .set({ status: "stopped", stoppedAt: new Date().toISOString() })
     .where(eq(gridBots.id, id))

@@ -10,37 +10,30 @@
  *   Base: https://data.alpaca.markets/v2
  */
 
+import { STOCK_INFO } from "./seed";
+
 const ALPACA_KEY    = process.env.ALPACA_KEY_ID     ?? "";
 const ALPACA_SECRET = process.env.ALPACA_SECRET_KEY ?? "";
 const DATA_BASE     = "https://data.alpaca.markets/v2";
 const PAPER_BASE    = "https://paper-api.alpaca.markets/v2";
 
-// All US stock tickers we track — Alpaca covers these
-// Crypto (BTC, ETH, SOL…) and forex (AUDUSD…) are NOT in this list — stay simulated
-export const ALPACA_STOCK_TICKERS = new Set([
-  "NVDA","MSFT","GOOGL","AMZN","META","AAPL","AVGO","AMD","PLTR","CRWD",
-  "SNOW","TSM","TSLA","NOW","ARM","SOUN","BBAI","GFAI","DNA","NKLA",
-  "MARA","RIOT","WULF","IREN","BTBT","KULR","SNDL","APRE","RAIL","CLOV",
-  "SMCI","IWM","RIVN","LCID","SOFI","RKLB","IONQ","RGTI","QUBT","AFRM",
-  "UPST","JOBY","LUNR","ACHR","DJT","VRT","NBIS","CLS","OKLO","SERV",
-  "MTSI","GME","AMC","KOSS","PLUG","SPCE","QBTS","ARQQ","BITF","HUT",
-  "MSTR","COIN","ASTS","MSAI","AIXI","SAVA","NKTR","PRAX","FFIE","SOLO",
-  "VFS","MNTS","ASTR","OPEN","HOOD","COUR","MAPS",
-  // Sector ETFs
-  "QQQ","SPY","XLK","XLF","XLE","XLV","XLI","SOXL","TQQQ","ARKK","GLD","USO","IVV","VTI",
-  // Consumer & Media
-  "NFLX","UBER","ABNB","DIS","SPOT",
-  // Healthcare & Pharma
-  "LLY","UNH","PFE","ABBV","MRK","MRNA","JNJ","AMGN","GILD",
-  // Energy
-  "XOM","CVX","OXY","SLB","COP","EOG",
-  // Financials & Payments
-  "JPM","BAC","GS","MS","V","MA","PYPL","WFC","C","AXP",
-  // Retail & Consumer Staples
-  "COST","WMT","TGT","HD",
-  // Enterprise SaaS
-  "CRM","ADBE",
-]);
+// Derive tracked US stock/ETF tickers directly from the seed universe.
+// This stays in sync automatically whenever tickers are added to STOCK_INFO.
+// Crypto, forex, commodity, and index tickers are excluded — they stay simulated.
+export const ALPACA_STOCK_TICKERS: Set<string> = (() => {
+  const set = new Set<string>();
+  for (const [ticker, info] of Object.entries(STOCK_INFO)) {
+    const mt = info.marketType ?? "stock";
+    if (mt === "stock") set.add(ticker);
+  }
+  return set;
+})();
+
+// ── Price-update callback (registered externally to avoid circular imports) ───
+let _onPriceUpdate: ((ticker: string, price: number) => void) | null = null;
+export function setAlpacaPriceCallback(cb: (ticker: string, price: number) => void): void {
+  _onPriceUpdate = cb;
+}
 
 // ── In-memory price cache ─────────────────────────────────────────────────────
 interface PriceEntry {
@@ -97,6 +90,7 @@ async function fetchChunk(tickers: string[]): Promise<void> {
       const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
       if (mid > 0) {
         priceCache.set(ticker, { price: mid, bid, ask, fetchedAt: now });
+        if (_onPriceUpdate) _onPriceUpdate(ticker, mid);
       }
     }
     alpacaConnected = true;

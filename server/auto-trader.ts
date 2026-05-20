@@ -313,6 +313,11 @@ function updateMTF(ticker: string, price: number) {
   _mtf.set(ticker, h);
 }
 
+/** Bug 7 fix: Allow Alpaca price-refresh loop to push bars into MTF for all tickers */
+export function pushMtfBar(ticker: string, price: number): void {
+  updateMTF(ticker, price);
+}
+
 function isTrendingUp(ticker: string): boolean {
   const h = _mtf.get(ticker) ?? [];
   if (h.length < 6) return true; // not enough data → allow
@@ -1272,7 +1277,11 @@ export function startAutoTrader() {
 
   // V19: Server-side background tick loop — engine runs every 2s regardless of browser tab
   if (_tickInterval) clearInterval(_tickInterval);
-  _tickInterval = setInterval(() => { if (state.isRunning) autoTraderTick(); }, 2000);
+  _tickInterval = setInterval(() => {
+    if (state.isRunning) {
+      try { autoTraderTick(); } catch (e) { console.error("[AutoTrader] tick error:", e); }
+    }
+  }, 2000);
 
   // Task #18: Periodic equity snapshot every 5 minutes so the equity curve shows
   // intra-session movement, not just step-jumps at trade exits.
