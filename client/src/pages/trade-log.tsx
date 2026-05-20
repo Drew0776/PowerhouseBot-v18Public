@@ -178,7 +178,16 @@ export default function TradeLog() {
         t.status,
       ];
     });
-    const csv = [headers, ...rows].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    // CSV-cell sanitizer: neutralize spreadsheet formula-injection payloads.
+    // Cells starting with =, +, -, @, tab, or CR are interpreted as formulas
+    // by Excel/Sheets/Numbers even when quoted. Prefix with a single quote so
+    // they render as plain text on import.
+    const sanitizeCell = (v: unknown) => {
+      const s = String(v ?? "");
+      const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    const csv = [headers, ...rows].map(row => row.map(sanitizeCell).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
