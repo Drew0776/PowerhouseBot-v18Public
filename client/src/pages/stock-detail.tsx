@@ -103,7 +103,7 @@ export default function StockDetail() {
     { label: "50d MA", value: `$${(stock.ma50 ?? 0).toFixed(2)}`, color: stock.price > stock.ma50 ? "#00e676" : "#ff1744" },
     { label: "Beta", value: (stock.beta ?? 0).toFixed(2) },
     { label: "Inst. Ownership", value: `${stock.institutionalOwnershipPct}%` },
-    { label: "Insider Activity", value: stock.insiderActivity > 0 ? "Net Buying" : stock.insiderActivity < 0 ? "Net Selling" : "Neutral", color: stock.insiderActivity > 0 ? "#00e676" : stock.insiderActivity < 0 ? "#ff1744" : "#ffd740" },
+    { label: "Insider Activity", value: Number(stock.insiderActivity) > 0 ? "Net Buying" : Number(stock.insiderActivity) < 0 ? "Net Selling" : "Neutral", color: Number(stock.insiderActivity) > 0 ? "#00e676" : Number(stock.insiderActivity) < 0 ? "#ff1744" : "#ffd740" },
     { label: "Sector", value: stock.sector },
     { label: "Next Earnings", value: stock.nextEarnings },
     { label: "52W Range", value: `$${(stock.fiftyTwoWeekLow ?? 0).toFixed(2)} – $${(stock.fiftyTwoWeekHigh ?? 0).toFixed(2)}` },

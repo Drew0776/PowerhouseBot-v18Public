@@ -228,8 +228,18 @@ async function runRefreshCycle(): Promise<void> {
   }
 }
 
+let _missingKeysWarned = false;
 export function startAlpacaFeed(): void {
   if (feedRunning) return; // Already running
+  if (!ALPACA_KEY || !ALPACA_SECRET) {
+    if (!_missingKeysWarned) {
+      console.warn("⚠️  Alpaca feed disabled — ALPACA_KEY_ID and/or ALPACA_SECRET_KEY are not set. Falling back to simulated prices.");
+      alpacaError = "missing ALPACA_KEY_ID / ALPACA_SECRET_KEY";
+      alpacaConnected = false;
+      _missingKeysWarned = true;
+    }
+    return;
+  }
   feedRunning = true;
   console.log("📡 Alpaca feed starting — fetching real prices...");
   // Kick off immediately, then schedule the next cycle from runRefreshCycle's finally

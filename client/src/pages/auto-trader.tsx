@@ -59,6 +59,8 @@ interface BreakoutSignal {
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
+  takeProfit1?: number;
+  takeProfit2?: number;
   positionSize: number;
   shares: number;
 }
@@ -72,6 +74,8 @@ interface ActivePosition {
   stopLoss: number;
   trailingStop: number;
   takeProfit: number;
+  takeProfit1?: number;
+  takeProfit2?: number;
   highWaterMark: number;
   pnl: number;
   pnlPct: number;
