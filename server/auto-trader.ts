@@ -368,24 +368,35 @@ function computeCompositeScore(s: StockData, mt: string): number | null {
                  : s.volumeSpikeRatio >= 0.9 ? 35
                  : 10;
 
-  // Momentum score: trend alignment + day change
+  // Momentum score: trend alignment + day change (or real-price ROC when Alpaca live)
   let momScore = 0;
   if ((s as any).ma20dAlignment === "Above") momScore += 50;
   if (s.macdSignal === 20) momScore += 30;
-  if (s.dayChangePercent > 2)  momScore += 20;
-  else if (s.dayChangePercent > 0.5) momScore += 10;
-  else if (s.dayChangePercent < -2)  momScore -= 20;
-  momScore = Math.max(0, Math.min(100, momScore));
 
-  // V19: Real-price momentum — blend in 5-bar ROC from Alpaca prices when available
-  if (ALPACA_STOCK_TICKERS.has(s.ticker)) {
+  // V19: Real-price momentum — replace simulated dayChangePercent drift component with
+  // actual 5-bar ROC when a valid live Alpaca price is available for this ticker.
+  // Tickers with no live price or insufficient bar history fall back to the simulated drift.
+  const _livePrice = getAlpacaPrice(s.ticker);
+  if (_livePrice != null) {
     const hist = _mtf.get(s.ticker) ?? [];
     if (hist.length >= 5) {
       const roc5 = (hist[hist.length - 1] - hist[hist.length - 5]) / hist[hist.length - 5];
-      const rocScore = Math.max(0, Math.min(100, (roc5 / 0.02) * 100));
-      momScore = Math.round(Math.max(0, Math.min(100, momScore * 0.60 + rocScore * 0.40)));
+      // Map: negative ROC → 0 pts, +2% ROC → 25 pts (replaces dayChangePercent component)
+      const rocScore = Math.max(0, Math.min(25, (roc5 / 0.02) * 25));
+      momScore += rocScore;
+    } else {
+      // Alpaca-tracked but fewer than 5 bars yet — use simulated drift as transient fallback
+      if (s.dayChangePercent > 2)  momScore += 20;
+      else if (s.dayChangePercent > 0.5) momScore += 10;
+      else if (s.dayChangePercent < -2)  momScore -= 20;
     }
+  } else {
+    // No live Alpaca price — keep original simulated drift component unchanged
+    if (s.dayChangePercent > 2)  momScore += 20;
+    else if (s.dayChangePercent > 0.5) momScore += 10;
+    else if (s.dayChangePercent < -2)  momScore -= 20;
   }
+  momScore = Math.max(0, Math.min(100, momScore));
 
   // Catalyst score: direct
   const catScore = Math.min(100, Math.max(0, s.catalystScore ?? 50));
