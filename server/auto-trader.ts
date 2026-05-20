@@ -1003,6 +1003,9 @@ export function autoTraderTick(): { signals: BreakoutSignal[]; entered: ActivePo
   const investedVal = state.openPositions.reduce((sum, pos) => sum + pos.currentPrice * pos.sharesRemaining, 0);
   state.capitalUtilization = pv.totalValue > 0 ? Math.round((investedVal / pv.totalValue) * 100) : 0;
 
+  // Task #16: Persist positions on every tick so a restart can resume them immediately
+  persistState();
+
   return { signals, entered, exited };
 }
 
@@ -1227,7 +1230,11 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 // ─── Controls ─────────────────────────────────────────────────────────────────
 
 export function startAutoTrader() {
-  restoreState(); // V17: restore persisted state on start
+  restoreState(); // V17: restore persisted state on start (including openPositions per Task #16)
+
+  // Snapshot restored positions before clearing simulation maps
+  const restoredPositions = [...state.openPositions];
+
   state.isRunning = true;
   state.dailyPnl = 0;
   state.circuitBreakerActive = false;
@@ -1242,6 +1249,17 @@ export function startAutoTrader() {
   cooldowns.clear();
   t1HitCount = 0;
   maxHoldCount = 0;
+
+  // Task #16: Re-seed price simulator for any restored open positions so managePositions()
+  // can advance prices correctly from the last known price on the very first tick.
+  // This ensures stop-loss / take-profit checks fire immediately if levels were breached
+  // during the downtime rather than waiting for GBM to drift back to those levels.
+  for (const pos of restoredPositions) {
+    const seedPrice = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
+    const h = pos.ticker.split("").reduce((a: number, c: string) => a + c.charCodeAt(0), 0) * 137;
+    _prices.set(pos.ticker, { price: seedPrice, lcg: h, mode: "ranging", trendTicks: 0, drift: 0 });
+    _seeds.set(pos.ticker, seedPrice);
+  }
 
   const p = storage.getPortfolio();
   dailyStart.value = p.totalValue;
@@ -1260,6 +1278,7 @@ export function startAutoTrader() {
 }
 
 // V17 ISSUE #1: Persist state to SQLite so restarts don't wipe everything
+// Task #16: openPositions now included so positions survive server restarts
 function persistState() {
   try {
     const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
@@ -1281,6 +1300,7 @@ function persistState() {
       dailyStartValue: dailyStart.value,
       dailyStartTick: dailyStart.tick,
       dailyStartDateKey: dailyStart.dateKey,
+      openPositions: state.openPositions,  // Task #16: persist open positions array
     }), new Date().toISOString());
   } catch (_e) { /* non-fatal — state still in memory */ }
 }
@@ -1305,7 +1325,20 @@ function restoreState() {
     if (s.dailyStartValue) dailyStart.value = s.dailyStartValue;
     if (s.dailyStartTick) dailyStart.tick = s.dailyStartTick;
     if (s.dailyStartDateKey) dailyStart.dateKey = s.dailyStartDateKey;
-    log(`♻️ State restored from DB: tick ${state.totalTicks}, P&L $${state.totalPnl.toFixed(2)}`);
+
+    // Task #16: Restore open positions — deduplicate by ticker to prevent double-entry
+    if (Array.isArray(s.openPositions) && s.openPositions.length > 0) {
+      const seen = new Set<string>();
+      state.openPositions = (s.openPositions as ActivePosition[]).filter(p => {
+        if (!p || !p.ticker || seen.has(p.ticker)) return false;
+        seen.add(p.ticker);
+        return true;
+      });
+      const tickers = state.openPositions.map(p => p.ticker).join(", ");
+      log(`♻️ State restored from DB: tick ${state.totalTicks}, P&L $${state.totalPnl.toFixed(2)}, positions: ${tickers}`);
+    } else {
+      log(`♻️ State restored from DB: tick ${state.totalTicks}, P&L $${state.totalPnl.toFixed(2)}`);
+    }
   } catch (_e) { /* fresh start */ }
 }
 
