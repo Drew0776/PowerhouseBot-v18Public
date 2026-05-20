@@ -265,7 +265,7 @@ function V6StatusBanner({ autoState }: { autoState: AutoTraderState | undefined 
       <div className="flex items-center justify-between mb-2.5">
         <div className="flex items-center gap-2">
           <Cpu className="w-3.5 h-3.5 text-[#00bcd4]" />
-          <span className="text-[10px] font-mono uppercase tracking-widest text-[#00bcd4] font-bold">V18 Engine Status</span>
+          <span className="text-[10px] font-mono uppercase tracking-widest text-[#00bcd4] font-bold">Engine Status</span>
         </div>
         <span className="text-[10px] font-mono text-zinc-500">Slip cost: <span className="text-[#ff5555]">-${fmt(slippageCost)}</span></span>
       </div>
@@ -318,7 +318,7 @@ function VelocityPanel({ autoState, portfolio }: { autoState: AutoTraderState | 
     <div className="bg-[#0e1420] border border-[#00bcd4]/20 rounded-xl p-3">
       <div className="flex items-center gap-2 mb-2.5">
         <TrendingUp className="w-3.5 h-3.5 text-[#00bcd4]" />
-        <span className="text-[10px] font-mono uppercase tracking-widest text-[#00bcd4] font-bold">V18 Performance</span>
+        <span className="text-[10px] font-mono uppercase tracking-widest text-[#00bcd4] font-bold">Performance</span>
         <span className="text-[9px] text-zinc-600 font-mono ml-auto">{autoState?.totalTicks ?? 0} ticks run</span>
       </div>
       <div className="grid grid-cols-3 gap-2">
@@ -1424,7 +1424,7 @@ export default function AutoTraderPage() {
               )}
             </div>
             <div className="min-w-0">
-              <h1 className="text-base font-bold text-white tracking-tight leading-none truncate">Auto-Trader <span className="text-[#00e676] text-[11px] font-mono font-bold">V18</span></h1>
+              <h1 className="text-base font-bold text-white tracking-tight leading-none truncate">Auto-Trader</h1>
               <p className="text-[10px] text-zinc-500 mt-0.5 leading-none truncate">OHLCV · MTF · Spread Sim · Event Filter · Walk-Forward</p>
             </div>
             {/* Status pill */}
