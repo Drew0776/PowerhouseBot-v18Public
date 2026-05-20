@@ -39,7 +39,8 @@ export default function SectorDonut() {
     <div className="rounded-lg border border-border p-4" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
       <h3 className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-2">Stock Universe</h3>
       <div className="flex items-center gap-4">
-        <ResponsiveContainer width={140} height={140}>
+        <div style={{ width: 140, height: 140, flexShrink: 0 }}>
+        <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
               data={pieData}
@@ -66,6 +67,7 @@ export default function SectorDonut() {
             />
           </PieChart>
         </ResponsiveContainer>
+        </div>
         <div className="space-y-2">
           {pieData.map((entry) => (
             <div key={entry.name} className="flex items-center gap-2">

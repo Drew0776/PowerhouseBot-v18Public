@@ -3,19 +3,35 @@ import { apiRequest } from "@/lib/queryClient";
 import type { UserSettings } from "@shared/schema";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { Shield, Crosshair, Link2, Bell } from "lucide-react";
+import { Shield, Crosshair, Bell, Activity, Wifi, WifiOff } from "lucide-react";
+
+interface AlpacaStatus {
+  connected: boolean;
+  error: string;
+  cachedTickers: number;
+  lastFetchMs: number;
+  account: {
+    status: string;
+    portfolioValue: number;
+    cash: number;
+    buyingPower: number;
+  } | null;
+}
 
 export default function Settings() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const { data: settings, isLoading } = useQuery<UserSettings>({ queryKey: ["/api/settings"] });
+  const { data: alpaca } = useQuery<AlpacaStatus>({
+    queryKey: ["/api/alpaca/status"],
+    refetchInterval: 30_000,
+  });
   const [local, setLocal] = useState<UserSettings | null>(null);
 
   useEffect(() => {
@@ -37,11 +53,25 @@ export default function Settings() {
 
   if (isLoading || !local) return <div className="p-6"><Skeleton className="h-96" /></div>;
 
-  const update = (key: keyof UserSettings, value: any) => {
+  const update = (key: keyof UserSettings, value: boolean | number | string) => {
     setLocal(prev => prev ? { ...prev, [key]: value } : prev);
   };
 
   const save = () => mutation.mutate(local);
+
+  const testTelegram = async () => {
+    try {
+      const r = await fetch("/api/telegram/test");
+      const d = await r.json() as { connected: boolean; message: string };
+      if (d.connected) {
+        toast({ title: "Telegram Connected", description: d.message });
+      } else {
+        toast({ title: "Telegram Not Configured", description: d.message, variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Test Failed", description: "Could not reach Telegram API.", variant: "destructive" });
+    }
+  };
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-3xl">
@@ -140,26 +170,59 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* Brokerage Connection */}
+      {/* Alpaca Connection Status */}
       <div className="rounded-lg border border-border p-5" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
         <div className="flex items-center gap-2 mb-4">
-          <Link2 className="w-4 h-4 text-[#00bcd4]" />
+          <Activity className="w-4 h-4 text-[#00bcd4]" />
           <h2 className="text-sm font-semibold text-foreground">Brokerage Connection</h2>
         </div>
-        <p className="text-xs text-muted-foreground mb-3">Connect a brokerage to execute real trades. Currently paper trading only.</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="rounded-md border border-border p-3 bg-accent/30">
-            <div className="text-xs font-semibold mb-1.5">Public.com</div>
-            <Input placeholder="API Key" className="h-7 text-[10px] font-mono mb-1.5" disabled data-testid="public-api-key" />
-            <Button variant="secondary" size="sm" className="h-7 text-[10px] w-full" disabled>Connect</Button>
+
+        <div className="rounded-md border border-border p-4 bg-accent/20">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">Alpaca</span>
+              {alpaca?.connected ? (
+                <span className="flex items-center gap-1 text-[10px] font-mono text-[#00e676] bg-[#00e676]/10 px-1.5 py-0.5 rounded">
+                  <Wifi className="w-2.5 h-2.5" /> LIVE
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-[10px] font-mono text-zinc-500 bg-zinc-800 px-1.5 py-0.5 rounded">
+                  <WifiOff className="w-2.5 h-2.5" /> OFFLINE
+                </span>
+              )}
+            </div>
+            {alpaca?.cachedTickers != null && (
+              <span className="text-[10px] text-muted-foreground font-mono">{alpaca.cachedTickers} tickers</span>
+            )}
           </div>
-          <div className="rounded-md border border-border p-3 bg-accent/30">
-            <div className="text-xs font-semibold mb-1.5">Alpaca</div>
-            <Input placeholder="API Key" className="h-7 text-[10px] font-mono mb-1.5" disabled data-testid="alpaca-api-key" />
-            <Button variant="secondary" size="sm" className="h-7 text-[10px] w-full" disabled>Connect</Button>
-          </div>
+
+          {alpaca?.account ? (
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Portfolio</p>
+                <p className="text-sm font-mono font-semibold text-foreground">
+                  ${alpaca.account.portfolioValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Cash</p>
+                <p className="text-sm font-mono font-semibold text-foreground">
+                  ${alpaca.account.cash.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Buying Power</p>
+                <p className="text-sm font-mono font-semibold text-foreground">
+                  ${alpaca.account.buyingPower.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {alpaca?.error ? `Error: ${alpaca.error}` : "Set ALPACA_KEY_ID and ALPACA_SECRET_KEY in environment secrets to connect."}
+            </p>
+          )}
         </div>
-        <p className="text-[10px] text-muted-foreground mt-2">Brokerage integration coming soon</p>
       </div>
 
       {/* Notifications */}
@@ -188,31 +251,29 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* V17: Telegram Alerts */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">
-        <h3 className="text-sm font-bold text-white mb-1 flex items-center gap-2">
-          📱 Telegram Alerts
-          <span className="text-[10px] font-mono text-[#00e676] bg-[#00e676]/10 px-2 py-0.5 rounded">V17 NEW</span>
-        </h3>
-        <p className="text-xs text-zinc-500 mb-4">Get real-time alerts for signals and circuit breaker events on your phone.</p>
+      {/* Telegram Alerts */}
+      <div className="rounded-lg border border-border p-5" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
+        <div className="flex items-center gap-2 mb-1">
+          <Bell className="w-4 h-4 text-[#00bcd4]" />
+          <h2 className="text-sm font-semibold text-foreground">Telegram Alerts</h2>
+        </div>
+        <p className="text-xs text-muted-foreground mb-4">Get real-time alerts for signals and circuit breaker events on your phone.</p>
         <div className="space-y-3 text-xs text-zinc-400">
-          <div className="bg-zinc-800 rounded p-3 space-y-2">
-            <p className="font-bold text-white">3-Step Setup:</p>
+          <div className="bg-zinc-800/60 rounded p-3 space-y-2">
+            <p className="font-semibold text-white">3-Step Setup:</p>
             <p>1. Message <span className="text-[#00e676]">@BotFather</span> on Telegram → /newbot → get your token</p>
             <p>2. Message <span className="text-[#00e676]">@userinfobot</span> on Telegram → get your Chat ID</p>
-            <p>3. Set these when starting the bot locally:</p>
-            <pre className="bg-zinc-950 rounded p-2 text-[#00e676] text-[10px] overflow-x-auto">TELEGRAM_BOT_TOKEN=your_token{"\n"}TELEGRAM_CHAT_ID=your_chat_id</pre>
+            <p>3. Add these as Replit Secrets:</p>
+            <pre className="bg-zinc-900 rounded p-2 text-[#00e676] text-[10px] overflow-x-auto">TELEGRAM_BOT_TOKEN=your_token{"\n"}TELEGRAM_CHAT_ID=your_chat_id</pre>
           </div>
-          <button
-            className="w-full py-2 rounded bg-[#00bcd4]/20 border border-[#00bcd4]/40 text-[#00bcd4] text-xs font-bold hover:bg-[#00bcd4]/30 transition"
-            onClick={async () => {
-              const r = await fetch("/api/telegram/test");
-              const d = await r.json();
-              alert(d.message);
-            }}
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full border-[#00bcd4]/40 text-[#00bcd4] hover:bg-[#00bcd4]/10"
+            onClick={testTelegram}
           >
             Test Telegram Connection
-          </button>
+          </Button>
         </div>
       </div>
 
