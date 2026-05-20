@@ -98,6 +98,7 @@ function OptionsTab() {
   const { data, isLoading } = useQuery<OptionsFlowRow[]>({ queryKey: ["/api/scanner/options"] });
 
   const columns = [
+
     { key: "rank",    label: "#",         render: (r: OptionsFlowRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                 sortValue: (r: OptionsFlowRow) => r.rank,                mobilePriority: 0 },
     { key: "ticker",  label: "Ticker",    render: (r: OptionsFlowRow) => <TickerLink ticker={r.ticker} />,                                                                       sortValue: (r: OptionsFlowRow) => r.ticker,              mobilePriority: 1 },
     { key: "price",   label: "Price",     render: (r: OptionsFlowRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                          sortValue: (r: OptionsFlowRow) => r.price ?? 0,          mobilePriority: 2 },
@@ -111,7 +112,16 @@ function OptionsTab() {
     { key: "signal",  label: "Signal",    render: (r: OptionsFlowRow) => <SignalBadge signal={r.signal ?? "HOLD"} />,                                                            sortValue: (r: OptionsFlowRow) => r.signal === "BUY" ? 3 : 2 },
   ];
 
-  return <ScannerTable data={data ?? []} columns={columns} getPrice={r => r.price ?? 0} getTicker={r => r.ticker} isLoading={isLoading} />;
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-1.5 px-1">
+        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-amber-400/80 bg-amber-400/10 border border-amber-400/20 rounded px-2 py-0.5">
+          ⚠ Simulated data — not live options flow
+        </span>
+      </div>
+      <ScannerTable data={data ?? []} columns={columns} getPrice={r => r.price ?? 0} getTicker={r => r.ticker} isLoading={isLoading} />
+    </>
+  );
 }
 
 // ── Main Scanner page ─────────────────────────────────────────────────────────
@@ -145,6 +155,11 @@ export default function Scanner() {
               {tab.id === "squeeze"  && "🔥 "}
               {tab.id === "options"  && "📊 "}
               {tab.label}
+              {tab.id === "options" && (
+                <span className="ml-1.5 text-[8px] font-mono font-bold px-1 py-0.5 rounded bg-amber-400/15 text-amber-400/80 border border-amber-400/20 tracking-wide">
+                  SIM
+                </span>
+              )}
             </button>
           ))}
         </div>

@@ -50,8 +50,8 @@ interface Column<T> {
   render: (row: T) => React.ReactNode;
   sortValue?: (row: T) => number | string;
   className?: string;
-  mobileHide?: boolean; // hide on small screens
-  mobilePriority?: number; // lower = show first on mobile
+  mobileHide?: boolean;
+  mobilePriority?: number;
 }
 
 interface ScannerTableProps<T> {
@@ -60,6 +60,10 @@ interface ScannerTableProps<T> {
   getPrice: (row: T) => number;
   getTicker: (row: T) => string;
   isLoading?: boolean;
+}
+
+function safeRender<T>(col: Column<T>, row: T): React.ReactNode {
+  try { return col.render(row); } catch { return <span className="text-zinc-600">—</span>; }
 }
 
 export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading }: ScannerTableProps<T>) {
@@ -106,11 +110,21 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
     else { setSortKey(key); setSortDir("desc"); }
   };
 
-  // Determine which columns are visible on mobile (first 4 non-hidden + signal + action)
   const visibleCols = columns.filter(c => !c.mobileHide);
-  const mobilePrimary = [...visibleCols]
-    .sort((a, b) => (a.mobilePriority ?? 99) - (b.mobilePriority ?? 99))
-    .slice(0, 4);
+
+  // Columns sorted by mobilePriority for card layout
+  const mobileCardCols = useMemo(() =>
+    [...visibleCols]
+      .filter(c => c.mobilePriority !== undefined)
+      .sort((a, b) => (a.mobilePriority ?? 99) - (b.mobilePriority ?? 99)),
+    [visibleCols]
+  );
+
+  const openTrade = (row: T) => {
+    setTradeTicker(getTicker(row));
+    setTradePrice(getPrice(row));
+    setTradeOpen(true);
+  };
 
   if (isLoading) {
     return (
@@ -126,7 +140,6 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
     <>
       {/* ── Filters (mobile-first) ── */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 mb-3 px-1">
-        {/* Search */}
         <div className="relative w-full sm:w-44">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
           <Input
@@ -137,7 +150,6 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
             data-testid="scanner-search"
           />
         </div>
-        {/* Price filter */}
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <span className="text-[10px] text-zinc-500 shrink-0">Max $</span>
           <Slider
@@ -153,9 +165,56 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
         </div>
       </div>
 
-      {/* ── Table — horizontal scroll on mobile ── */}
-      <div className="rounded-xl border border-zinc-800 overflow-hidden">
-        <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+      {/* ── Mobile card layout (< md) ── */}
+      <div className="block md:hidden space-y-2">
+        {sorted.map((row, i) => {
+          const tickerCol = mobileCardCols[0];
+          const priceCol  = mobileCardCols[1];
+          const metric1   = mobileCardCols[2];
+          const metric2   = mobileCardCols[3];
+          const signalCol = visibleCols.find(c => c.key === "signal");
+
+          return (
+            <div
+              key={i}
+              className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 flex items-center justify-between gap-2"
+            >
+              {/* Left: ticker + price */}
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  {tickerCol && safeRender(tickerCol, row)}
+                  {signalCol && safeRender(signalCol, row)}
+                </div>
+                <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+                  {priceCol && safeRender(priceCol, row)}
+                  {metric1 && <span>{safeRender(metric1, row)}</span>}
+                </div>
+              </div>
+
+              {/* Right: score metric + trade button */}
+              <div className="flex items-center gap-2 shrink-0">
+                {metric2 && <span>{safeRender(metric2, row)}</span>}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-6 text-[9px] px-2 font-bold"
+                  onClick={() => openTrade(row)}
+                  data-testid={`trade-${getTicker(row)}`}
+                >
+                  Trade
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+        {sorted.length === 0 && (
+          <div className="text-center py-8 text-zinc-500 text-xs">No results matching your filters</div>
+        )}
+      </div>
+
+      {/* ── Desktop table layout (≥ md) ── */}
+      <div className="hidden md:block rounded-xl border border-zinc-800 overflow-hidden">
+        <div className="overflow-x-auto">
           <table className="w-full text-xs min-w-[480px]">
             <thead>
               <tr className="border-b border-zinc-800 bg-[#0d0f12]">
@@ -187,7 +246,7 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
                 >
                   {visibleCols.map(col => (
                     <td key={col.key} className={`px-2.5 py-2 whitespace-nowrap ${col.className || ""}`}>
-                      {(() => { try { return col.render(row); } catch { return <span className="text-zinc-600">—</span>; } })()}
+                      {safeRender(col, row)}
                     </td>
                   ))}
                   <td className="px-2.5 py-2 text-right">
@@ -197,9 +256,7 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
                       className="h-6 text-[9px] px-2 font-bold"
                       onClick={e => {
                         e.stopPropagation();
-                        setTradeTicker(getTicker(row));
-                        setTradePrice(getPrice(row));
-                        setTradeOpen(true);
+                        openTrade(row);
                       }}
                       data-testid={`trade-${getTicker(row)}`}
                     >
@@ -225,5 +282,4 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
   );
 }
 
-// Re-export helpers
 export { };
