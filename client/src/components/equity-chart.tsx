@@ -4,10 +4,11 @@ import {
 
 interface EquityChartProps {
   data: { id: number; timestamp: string; value: number }[];
+  hasTrades?: boolean;
 }
 
-export default function EquityChart({ data }: EquityChartProps) {
-  const isEmpty = data.length === 0;
+export default function EquityChart({ data, hasTrades = true }: EquityChartProps) {
+  const isEmpty = !hasTrades;
 
   const chartData = isEmpty
     ? [{ time: "Start", value: 100, spy: 100 }, { time: "Now", value: 100, spy: 100 }]

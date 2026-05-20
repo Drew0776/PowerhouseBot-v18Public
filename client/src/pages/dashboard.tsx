@@ -83,7 +83,7 @@ export default function Dashboard() {
             {loadingCurve ? (
               <Skeleton className="h-72 rounded-lg" />
             ) : (
-              <EquityChart data={equityCurve || []} />
+              <EquityChart data={equityCurve || []} hasTrades={totalTrades > 0} />
             )}
           </div>
           <div className="lg:col-span-2">
