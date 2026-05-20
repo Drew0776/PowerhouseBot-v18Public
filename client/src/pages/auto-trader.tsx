@@ -1453,16 +1453,31 @@ export default function AutoTraderPage() {
 
           {/* Engine toggle — always visible, right side */}
           {isRunning ? (
-            <Button
-              data-testid="button-stop-engine"
-              onClick={() => stopMutation.mutate()}
-              disabled={stopMutation.isPending}
-              size="sm"
-              className="shrink-0 h-9 px-4 font-bold text-xs tracking-wide gap-1.5 bg-zinc-800 hover:bg-zinc-700 text-[#ff5555] border border-zinc-700"
-            >
-              <Square className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">STOP</span> ENGINE
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  data-testid="button-stop-engine"
+                  disabled={stopMutation.isPending}
+                  size="sm"
+                  className="shrink-0 h-9 px-4 font-bold text-xs tracking-wide gap-1.5 bg-zinc-800 hover:bg-zinc-700 text-[#ff5555] border border-zinc-700"
+                >
+                  <Square className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">STOP</span> ENGINE
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Stop the trading engine?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Active positions will remain open.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => stopMutation.mutate()}>Stop</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           ) : (
             <Button
               data-testid="button-start-engine"
