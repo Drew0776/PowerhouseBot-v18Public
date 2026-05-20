@@ -321,13 +321,18 @@ export async function registerRoutes(
   });
 
   // POST /api/trades — execute a paper trade (buy)
+  // SECURITY: the execution price is *always* taken from the server-side
+  // market data (getStockByTicker). Any client-supplied price is ignored so
+  // callers cannot forge entry prices and mint arbitrary profits on close.
+  const MAX_SHARES = 1_000_000;
   const tradeSchema = z.object({
-    ticker: z.string().min(1),
+    ticker: z.string().min(1).max(16).regex(/^[A-Za-z0-9.\-]+$/, "invalid ticker"),
     action: z.enum(["buy", "sell"]),
-    shares: z.number().positive(),
-    price: z.number().positive(),
-    stopLoss: z.number().optional(),
-    takeProfit: z.number().optional(),
+    shares: z.number().positive().max(MAX_SHARES),
+    // price is accepted for backward-compat but intentionally ignored
+    price: z.number().positive().optional(),
+    stopLoss: z.number().positive().optional(),
+    takeProfit: z.number().positive().optional(),
   });
 
   app.post("/api/trades", (req, res) => {
@@ -337,8 +342,21 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid trade data", errors: parsed.error.errors });
       }
 
-      const { ticker, action, shares, price, stopLoss, takeProfit } = parsed.data;
-      const total = Math.round(shares * price * 100) / 100;
+      const { ticker, action, shares, stopLoss, takeProfit } = parsed.data;
+      const upperTicker = ticker.toUpperCase();
+
+      // Validate the ticker is one the server actually tracks, and use the
+      // server-side market price as the execution price.
+      const stock = getStockByTicker(upperTicker);
+      if (!stock) {
+        return res.status(404).json({ message: "Unknown ticker" });
+      }
+      const execPrice = stock.price;
+      if (!(execPrice > 0)) {
+        return res.status(503).json({ message: "Market price unavailable" });
+      }
+
+      const total = Math.round(shares * execPrice * 100) / 100;
 
       // Check if we have enough cash for buy
       if (action === "buy") {
@@ -349,10 +367,10 @@ export async function registerRoutes(
       }
 
       const trade = storage.createTrade({
-        ticker: ticker.toUpperCase(),
+        ticker: upperTicker,
         action,
         shares,
-        price,
+        price: execPrice,
         total,
         stopLoss: stopLoss ?? null,
         takeProfit: takeProfit ?? null,
@@ -639,13 +657,25 @@ export async function registerRoutes(
   });
 
   // GET /api/grid/preview — preview grid levels before creating
+  // SECURITY: clamp `count` (and bound lower/upper) to the same safe range
+  // used by createBotSchema so a malicious caller cannot force the server to
+  // allocate a multi-million-element array (memory-exhaustion DoS).
   app.get("/api/grid/preview", (req, res) => {
     try {
       const lower = parseFloat(req.query.lower as string);
       const upper = parseFloat(req.query.upper as string);
       const count = parseInt(req.query.count as string);
-      if (isNaN(lower) || isNaN(upper) || isNaN(count)) {
+      if (!Number.isFinite(lower) || !Number.isFinite(upper) || !Number.isInteger(count)) {
         return res.status(400).json({ message: "lower, upper, count required" });
+      }
+      if (lower <= 0 || upper <= 0 || lower >= upper) {
+        return res.status(400).json({ message: "lower must be > 0 and < upper" });
+      }
+      if (upper > 1_000_000) {
+        return res.status(400).json({ message: "upper must be <= 1,000,000" });
+      }
+      if (count < 2 || count > 50) {
+        return res.status(400).json({ message: "count must be between 2 and 50" });
       }
       const levels = buildGridLevels(lower, upper, count);
       const profitPerGrid = calcProfitPerGrid(lower, upper, count);
