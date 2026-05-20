@@ -1260,9 +1260,7 @@ function Section({
 export default function AutoTraderPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── State fetch ──
+  // ── State fetch — polls every 2s so dashboard updates without browser-driven ticks ──
   const {
     data: state,
     isLoading,
@@ -1273,7 +1271,7 @@ export default function AutoTraderPage() {
       const r = await apiRequest("GET", "/api/auto-trader");
       return r.json();
     },
-    refetchInterval: false,
+    refetchInterval: 2000,
   });
 
   // ── Portfolio fetch ──
@@ -1375,28 +1373,9 @@ export default function AutoTraderPage() {
     },
   });
 
-  // ── Auto-tick interval ──
+  // Server now drives ticks automatically via a Node.js setInterval in startAutoTrader().
+  // The frontend only polls the state query (refetchInterval: 2000) to refresh the UI.
   const isRunning = state?.isRunning ?? false;
-
-  const runAutoTick = useCallback(() => {
-    tickMutation.mutate();
-  }, []);
-
-  useEffect(() => {
-    if (tickIntervalRef.current) {
-      clearInterval(tickIntervalRef.current);
-      tickIntervalRef.current = null;
-    }
-    if (isRunning) {
-      tickIntervalRef.current = setInterval(runAutoTick, 2000);
-    }
-    return () => {
-      if (tickIntervalRef.current) {
-        clearInterval(tickIntervalRef.current);
-        tickIntervalRef.current = null;
-      }
-    };
-  }, [isRunning]);
 
   // ── Derived ──
   const openCount = state?.openPositions?.length ?? 0;

@@ -377,6 +377,16 @@ function computeCompositeScore(s: StockData, mt: string): number | null {
   else if (s.dayChangePercent < -2)  momScore -= 20;
   momScore = Math.max(0, Math.min(100, momScore));
 
+  // V19: Real-price momentum — blend in 5-bar ROC from Alpaca prices when available
+  if (ALPACA_STOCK_TICKERS.has(s.ticker)) {
+    const hist = _mtf.get(s.ticker) ?? [];
+    if (hist.length >= 5) {
+      const roc5 = (hist[hist.length - 1] - hist[hist.length - 5]) / hist[hist.length - 5];
+      const rocScore = Math.max(0, Math.min(100, (roc5 / 0.02) * 100));
+      momScore = Math.round(Math.max(0, Math.min(100, momScore * 0.60 + rocScore * 0.40)));
+    }
+  }
+
   // Catalyst score: direct
   const catScore = Math.min(100, Math.max(0, s.catalystScore ?? 50));
 
@@ -607,6 +617,7 @@ let state: AutoTraderState = {
 };
 
 let wins = 0, losses = 0, totalWinAmt = 0, totalLossAmt = 0;
+let _tickInterval: ReturnType<typeof setInterval> | null = null;
 const cooldowns = new Map<string, number>();
 const dailyStart = { value: 100, tick: 0, dateKey: '' }; // V17: dateKey tracks calendar day for daily P&L reset
 const pnlHistory: number[] = [];
@@ -1228,7 +1239,13 @@ export function startAutoTrader() {
   sessionPeak = p.totalValue;
 
   startAlpacaFeed(); // V18: kick off real price polling
-  log(`🚀 V18 LIVE | $${p.totalValue.toFixed(2)} | Alpaca REAL prices | UnifiedExit | DailyReset | StatePersist`);
+
+  // V19: Server-side background tick loop — engine runs every 2s regardless of browser tab
+  if (_tickInterval) clearInterval(_tickInterval);
+  _tickInterval = setInterval(() => { if (state.isRunning) autoTraderTick(); }, 2000);
+  persistState(); // persist isRunning=true so server restart can auto-resume
+
+  log(`🚀 V19 LIVE | $${p.totalValue.toFixed(2)} | Alpaca REAL prices | ServerTick | AutoResume | StatePersist`);
 }
 
 // V17 ISSUE #1: Persist state to SQLite so restarts don't wipe everything
@@ -1239,6 +1256,7 @@ function persistState() {
       INSERT OR REPLACE INTO engine_state (id, state_json, updated_at)
       VALUES (1, ?, ?)
     `).run(JSON.stringify({
+      isRunning: state.isRunning,
       totalTicks: state.totalTicks,
       totalTrades: state.totalTrades,
       closedTrades: state.closedTrades,
@@ -1281,10 +1299,11 @@ function restoreState() {
 }
 
 export function stopAutoTrader() {
+  if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
   state.isRunning = false;
-  persistState(); // V17: save before stop
+  persistState(); // save including isRunning: false
   stopAlpacaFeed(); // V18: stop polling
-  log("⏹ V18 STOPPED");
+  log("⏹ V19 STOPPED");
 }
 
 export function resetCircuitBreaker() {
@@ -1304,7 +1323,9 @@ export function isAutoTraderRunning(): boolean {
 }
 
 export function resetAutoTraderState() {
-  // Stop the engine (persists stale state first — we'll overwrite it below)
+  // Clear background tick loop first
+  if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+  // Stop the engine if running
   if (state.isRunning) {
     state.isRunning = false;
     stopAlpacaFeed();
