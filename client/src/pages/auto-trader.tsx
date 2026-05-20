@@ -3,6 +3,17 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -1503,17 +1514,34 @@ export default function AutoTraderPage() {
               <Zap className="w-3 h-3" />
               TICK
             </Button>
-            <Button
-              data-testid="button-reset"
-              onClick={() => resetMutation.mutate()}
-              disabled={resetMutation.isPending || isRunning}
-              size="sm"
-              variant="outline"
-              className="h-7 text-[11px] border-red-900/40 text-zinc-500 hover:text-[#ff5555] hover:border-red-700/50 font-mono gap-1.5 px-3"
-              title="Reset portfolio to $100 (stop engine first)"
-            >
-              RESET
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  data-testid="button-reset"
+                  disabled={resetMutation.isPending || isRunning}
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[11px] border-red-900/40 text-zinc-500 hover:text-[#ff5555] hover:border-red-700/50 font-mono gap-1.5 px-3"
+                  title="Reset portfolio to $100 (stop engine first)"
+                >
+                  RESET
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Reset Portfolio?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will delete all trades and reset your portfolio to $100. This cannot be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => resetMutation.mutate()}>
+                    Reset
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         </div>
       </div>
