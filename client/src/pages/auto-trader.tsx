@@ -33,7 +33,9 @@ import {
   Area,
   Tooltip,
   ResponsiveContainer,
+  type TooltipProps,
 } from "recharts";
+import type { PortfolioSummary } from "@shared/schema";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -290,7 +292,7 @@ function V6StatusBanner({ autoState }: { autoState: AutoTraderState | undefined 
 
 // ─── V18 Performance Velocity Panel ──────────────────────────────────────────────────
 
-function VelocityPanel({ autoState, portfolio }: { autoState: AutoTraderState | undefined; portfolio: any }) {
+function VelocityPanel({ autoState, portfolio }: { autoState: AutoTraderState | undefined; portfolio: PortfolioSummary | undefined }) {
   const roi = autoState?.roiPct ?? 0;
   const pnlPerTick = autoState?.pnlPerTick ?? 0;
   const freq = autoState?.tradesPerHundredTicks ?? 0;
@@ -354,8 +356,9 @@ function BacktestPanel() {
       const r = await apiRequest("POST", "/api/auto-trader/backtest", { ticks });
       const data = await r.json();
       setResult(data);
-    } catch (e: any) {
-      toast({ title: "Backtest failed", description: e.message, variant: "destructive" });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ title: "Backtest failed", description: msg, variant: "destructive" });
     } finally {
       setRunning(false);
     }
@@ -593,7 +596,7 @@ function MiniEquityCurve() {
       ? points.map((p) => ({ value: p.value }))
       : [{ value: startVal }, { value: startVal }];
 
-  const CustomTooltip = ({ active, payload }: any) => {
+  const CustomTooltip = ({ active, payload }: TooltipProps<number, string>) => {
     if (active && payload && payload.length) {
       const val = payload[0].value as number;
       return (
@@ -1263,7 +1266,7 @@ export default function AutoTraderPage() {
   });
 
   // ── Portfolio fetch ──
-  const { data: portfolio } = useQuery<any>({
+  const { data: portfolio } = useQuery<PortfolioSummary>({
     queryKey: ["/api/portfolio"],
     queryFn: async () => {
       const r = await apiRequest("GET", "/api/portfolio");
@@ -1284,7 +1287,7 @@ export default function AutoTraderPage() {
         description: "Auto-Trader is now scanning for momentum breakouts.",
       });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast({ title: "Failed to start", description: err.message, variant: "destructive" });
     },
   });
@@ -1303,7 +1306,7 @@ export default function AutoTraderPage() {
         variant: "destructive",
       });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast({ title: "Failed to stop", description: err.message, variant: "destructive" });
     },
   });
@@ -1314,7 +1317,7 @@ export default function AutoTraderPage() {
       const r = await apiRequest("POST", "/api/auto-trader/tick");
       return r.json();
     },
-    onSuccess: (result: any) => {
+    onSuccess: (result: { entered?: ActivePosition | null; exited?: string[]; signals?: BreakoutSignal[] }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/auto-trader"] });
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio"] });
       refetchState();
@@ -1338,7 +1341,7 @@ export default function AutoTraderPage() {
       refetchState();
       toast({ title: "Scan Complete", description: "Signal table updated." });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast({ title: "Scan failed", description: err.message, variant: "destructive" });
     },
   });
@@ -1355,7 +1358,7 @@ export default function AutoTraderPage() {
       refetchState();
       toast({ title: "Portfolio Reset", description: "All trades cleared. Starting fresh from $100." });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast({ title: "Reset failed", description: err.message, variant: "destructive" });
     },
   });
