@@ -1355,6 +1355,7 @@ export default function AutoTraderPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/auto-trader"] });
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["/api/equity-curve"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/trades"] });
       refetchState();
       toast({ title: "Portfolio Reset", description: "All trades cleared. Starting fresh from $100." });
     },
