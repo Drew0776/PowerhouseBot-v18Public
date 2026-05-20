@@ -11,11 +11,31 @@ function sf(n: number | undefined | null, d = 2) {
   return (n as number).toFixed(d);
 }
 
-function TickerLink({ ticker, live }: { ticker: string; live?: boolean }) {
+interface AlpacaStatus {
+  connected: boolean;
+  reconnecting: boolean;
+  stale: boolean;
+  consecutiveFailures: number;
+  nextRetryInMs: number;
+  freshTickers: number;
+  trackedTickers: number;
+}
+
+function useAlpacaStatus() {
+  return useQuery<AlpacaStatus>({ queryKey: ["/api/alpaca/status"], refetchInterval: 5000 });
+}
+
+function TickerLink({ ticker, live, stale }: { ticker: string; live?: boolean; stale?: boolean }) {
   return (
     <Link href={`/stock/${ticker}`}>
       <span className="inline-flex items-center gap-1 font-mono font-bold text-[#00bcd4] cursor-pointer hover:underline">
-        {live && (
+        {live && stale && (
+          <span
+            className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0"
+            title="Price feed is stale — reconnecting"
+          />
+        )}
+        {live && !stale && (
           <span
             className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"
             title="Live Alpaca price"
@@ -24,6 +44,39 @@ function TickerLink({ ticker, live }: { ticker: string; live?: boolean }) {
         {ticker}
       </span>
     </Link>
+  );
+}
+
+function FeedStatusBanner({ status }: { status: AlpacaStatus | undefined }) {
+  if (!status) return null;
+  if (status.connected && !status.stale && !status.reconnecting) return null;
+
+  const reconnecting = status.reconnecting || (!status.connected && status.consecutiveFailures > 0);
+  const retrySec = status.nextRetryInMs > 0 ? Math.ceil(status.nextRetryInMs / 1000) : null;
+
+  return (
+    <div
+      data-testid="feed-status-banner"
+      className={`mx-4 mb-2 flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] ${
+        reconnecting
+          ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+          : "border-zinc-700 bg-zinc-800/50 text-zinc-400"
+      }`}
+    >
+      <span
+        className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+          reconnecting ? "bg-amber-400 animate-pulse" : "bg-zinc-500"
+        }`}
+      />
+      <span className="font-semibold tracking-wide uppercase">
+        {reconnecting ? "Reconnecting" : "Stale"}
+      </span>
+      <span className="text-zinc-400">
+        {reconnecting
+          ? `Alpaca feed retrying (attempt ${status.consecutiveFailures}${retrySec != null ? `, next in ${retrySec}s` : ""})`
+          : `Prices last updated >30s ago — displaying simulated values`}
+      </span>
+    </div>
   );
 }
 
@@ -39,12 +92,12 @@ const TABS = [
 type TabId = typeof TABS[number]["id"];
 
 // ── 100x Hunter (penny) ──────────────────────────────────────────────────────
-function PennyTab() {
+function PennyTab({ stale }: { stale: boolean }) {
   const { data, isLoading } = useQuery<PennyStockRow[]>({ queryKey: ["/api/scanner/penny"], refetchInterval: 3000 });
 
   const columns = [
     { key: "rank",     label: "#",        render: (r: PennyStockRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                        sortValue: (r: PennyStockRow) => r.rank,                 mobilePriority: 0 },
-    { key: "ticker",   label: "Ticker",   render: (r: PennyStockRow) => <TickerLink ticker={r.ticker} live={r.livePrice} />,                                                           sortValue: (r: PennyStockRow) => r.ticker,               mobilePriority: 1 },
+    { key: "ticker",   label: "Ticker",   render: (r: PennyStockRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                           sortValue: (r: PennyStockRow) => r.ticker,               mobilePriority: 1 },
     { key: "price",    label: "Price",    render: (r: PennyStockRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                                sortValue: (r: PennyStockRow) => r.price ?? 0,           mobilePriority: 2 },
     { key: "day",      label: "Day %",    render: (r: PennyStockRow) => <PctCell value={r.dayChangePercent} />,                                                                        sortValue: (r: PennyStockRow) => r.dayChangePercent ?? 0, mobilePriority: 3 },
     { key: "week",     label: "Wk %",     render: (r: PennyStockRow) => <PctCell value={r.weekChangePercent} />,                                                                       sortValue: (r: PennyStockRow) => r.weekChangePercent ?? 0, mobilePriority: 5 },
@@ -61,12 +114,12 @@ function PennyTab() {
 }
 
 // ── Momentum ──────────────────────────────────────────────────────────────────
-function MomentumTab() {
+function MomentumTab({ stale }: { stale: boolean }) {
   const { data, isLoading } = useQuery<MomentumRow[]>({ queryKey: ["/api/scanner/momentum"], refetchInterval: 3000 });
 
   const columns = [
     { key: "rank",   label: "#",       render: (r: MomentumRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                   sortValue: (r: MomentumRow) => r.rank,                  mobilePriority: 0 },
-    { key: "ticker", label: "Ticker",  render: (r: MomentumRow) => <TickerLink ticker={r.ticker} live={r.livePrice} />,                                                      sortValue: (r: MomentumRow) => r.ticker,                mobilePriority: 1 },
+    { key: "ticker", label: "Ticker",  render: (r: MomentumRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                      sortValue: (r: MomentumRow) => r.ticker,                mobilePriority: 1 },
     { key: "price",  label: "Price",   render: (r: MomentumRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                            sortValue: (r: MomentumRow) => r.price ?? 0,            mobilePriority: 2 },
     { key: "day",    label: "Day %",   render: (r: MomentumRow) => <PctCell value={r.dayChangePercent} />,                                                                    sortValue: (r: MomentumRow) => r.dayChangePercent ?? 0, mobilePriority: 3 },
     { key: "rsi",    label: "RSI",     render: (r: MomentumRow) => <span className="font-mono tabular-nums" style={{ color: (r.rsi ?? 50) > 70 ? "#ff1744" : (r.rsi ?? 50) < 30 ? "#00e676" : "#e0e0e0" }}>{sf(r.rsi, 0)}</span>, sortValue: (r: MomentumRow) => r.rsi ?? 50, mobilePriority: 4 },
@@ -83,12 +136,12 @@ function MomentumTab() {
 }
 
 // ── Short Squeeze ─────────────────────────────────────────────────────────────
-function SqueezeTab() {
+function SqueezeTab({ stale }: { stale: boolean }) {
   const { data, isLoading } = useQuery<SqueezeRow[]>({ queryKey: ["/api/scanner/squeeze"], refetchInterval: 3000 });
 
   const columns = [
     { key: "rank",   label: "#",        render: (r: SqueezeRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                     sortValue: (r: SqueezeRow) => r.rank,                  mobilePriority: 0 },
-    { key: "ticker", label: "Ticker",   render: (r: SqueezeRow) => <TickerLink ticker={r.ticker} live={r.livePrice} />,                                                        sortValue: (r: SqueezeRow) => r.ticker,                mobilePriority: 1 },
+    { key: "ticker", label: "Ticker",   render: (r: SqueezeRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                        sortValue: (r: SqueezeRow) => r.ticker,                mobilePriority: 1 },
     { key: "price",  label: "Price",    render: (r: SqueezeRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                              sortValue: (r: SqueezeRow) => r.price ?? 0,            mobilePriority: 2 },
     { key: "si",     label: "SI %",     render: (r: SqueezeRow) => <span className="font-mono tabular-nums font-bold" style={{ color: (r.shortInterestPct ?? 0) > 20 ? "#ff1744" : "#ffd740" }}>{sf(r.shortInterestPct)}%</span>, sortValue: (r: SqueezeRow) => r.shortInterestPct ?? 0, mobilePriority: 3 },
     { key: "dtc",    label: "DTC",      render: (r: SqueezeRow) => <span className="font-mono tabular-nums" style={{ color: (r.daysToCover ?? 0) > 5 ? "#ff1744" : "#ffd740" }}>{sf(r.daysToCover, 1)}d</span>, sortValue: (r: SqueezeRow) => r.daysToCover ?? 0, mobilePriority: 4 },
@@ -138,6 +191,8 @@ export default function Scanner() {
   const [activeTab, setActiveTab] = useState<TabId>("penny");
   const { data: universeData } = useQuery<{ count: number }>({ queryKey: ["/api/universe/count"], staleTime: 60_000 });
   const universeCount = universeData?.count ?? "—";
+  const { data: status } = useAlpacaStatus();
+  const feedStale = !!(status && (status.stale || status.reconnecting));
 
   return (
     <div className="flex flex-col bg-[#0d0f12] min-h-screen">
@@ -176,11 +231,14 @@ export default function Scanner() {
         </div>
       </div>
 
+      {/* Feed health banner — only renders when reconnecting or stale */}
+      <FeedStatusBanner status={status} />
+
       {/* Tab content */}
       <div className="px-4 pb-4">
-        {activeTab === "penny"    && <PennyTab />}
-        {activeTab === "momentum" && <MomentumTab />}
-        {activeTab === "squeeze"  && <SqueezeTab />}
+        {activeTab === "penny"    && <PennyTab stale={feedStale} />}
+        {activeTab === "momentum" && <MomentumTab stale={feedStale} />}
+        {activeTab === "squeeze"  && <SqueezeTab stale={feedStale} />}
         {activeTab === "options"  && <OptionsTab />}
       </div>
     </div>
