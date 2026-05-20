@@ -8,6 +8,51 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+function FeedHealthBadge() {
+  const { data } = useQuery<{ connected: boolean; reconnecting: boolean; stale: boolean }>({
+    queryKey: ["/api/alpaca/status"],
+    refetchInterval: 5000,
+  });
+  // Until status arrives, render LIVE optimistically.
+  const connected = data ? !!data.connected : true;
+  const reconnecting = !!data?.reconnecting;
+  const stale = !!data?.stale && !reconnecting;
+  // Reconnecting takes priority; then stale; then any unhealthy state.
+  if (reconnecting || (!connected && !stale)) {
+    return (
+      <div
+        data-testid="feed-badge"
+        className="flex items-center gap-1.5 bg-amber-500/10 border border-amber-500/30 rounded-full px-2.5 py-1"
+        title="Alpaca feed reconnecting"
+      >
+        <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+        <span className="text-[10px] font-bold text-amber-300 tracking-wider">RECONN</span>
+      </div>
+    );
+  }
+  if (stale) {
+    return (
+      <div
+        data-testid="feed-badge"
+        className="flex items-center gap-1.5 bg-zinc-700/30 border border-zinc-600/40 rounded-full px-2.5 py-1"
+        title="Prices stale — using simulation"
+      >
+        <div className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+        <span className="text-[10px] font-bold text-zinc-300 tracking-wider">STALE</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      data-testid="feed-badge"
+      className="flex items-center gap-1.5 bg-[#00e676]/10 border border-[#00e676]/20 rounded-full px-2.5 py-1"
+    >
+      <div className="w-1.5 h-1.5 rounded-full bg-[#00e676] animate-pulse" />
+      <span className="text-[10px] font-bold text-[#00e676] tracking-wider">LIVE</span>
+    </div>
+  );
+}
+
 const NAV_ITEMS = [
   { href: "/",       label: "Dashboard",   shortLabel: "Home",     icon: LayoutDashboard },
   { href: "/auto",   label: "Auto-Trader", shortLabel: "Auto",     icon: Bot,             badge: "LIVE" },
@@ -258,12 +303,9 @@ function MobileTopBar({ onMenuOpen }: { onMenuOpen: () => void }) {
         </div>
       </div>
 
-      {/* Right side: LIVE badge + menu button */}
+      {/* Right side: LIVE/STALE/RECONN badge + menu button */}
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-1.5 bg-[#00e676]/10 border border-[#00e676]/20 rounded-full px-2.5 py-1">
-          <div className="w-1.5 h-1.5 rounded-full bg-[#00e676] animate-pulse" />
-          <span className="text-[10px] font-bold text-[#00e676] tracking-wider">LIVE</span>
-        </div>
+        <FeedHealthBadge />
         <button
           onClick={onMenuOpen}
           className="w-9 h-9 flex items-center justify-center rounded-xl bg-zinc-800/80 border border-zinc-700 text-zinc-300 hover:text-white active:scale-95 transition-all"
