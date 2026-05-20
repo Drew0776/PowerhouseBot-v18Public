@@ -46,7 +46,7 @@ async function sendTelegramAlert(message: string): Promise<void> {
 export { sendTelegramAlert };
 
 // Alpaca feed
-import { getAlpacaStatus, getAlpacaAccount, refreshAllPrices, startAlpacaFeed } from "./alpaca";
+import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed } from "./alpaca";
 import { z } from "zod";
 
 // Deterministic random for market status & options flow
@@ -77,11 +77,14 @@ export async function registerRoutes(
   app.get("/api/signals", (_req, res) => {
     try {
       const stocks = getStockData();
-      const signals = stocks.map((s, i) => ({
+      const signals = stocks.map((s, i) => {
+        // Use real Alpaca price for tracked US stocks when feed is live
+        const livePrice = ALPACA_STOCK_TICKERS.has(s.ticker) ? (getAlpacaPrice(s.ticker) ?? s.price) : s.price;
+        return ({
         rank: i + 1,
         ticker: s.ticker,
         name: s.name,
-        price: s.price,
+        price: livePrice,
         dayChangePercent: s.dayChangePercent,
         volumeVsAvg: Math.round((s.volume / s.avgVolume) * 100) / 100,
         momentumScore: s.momentumScore,
@@ -99,7 +102,9 @@ export async function registerRoutes(
         volumeSpikeRatio: s.volumeSpikeRatio,
         shortInterestPct: s.shortInterestPct,
         floatShares: s.floatShares,
-      }));
+        livePrice: ALPACA_STOCK_TICKERS.has(s.ticker) && getAlpacaPrice(s.ticker) != null,
+      });
+      });
       res.json(signals);
     } catch (err) {
       res.status(500).json({ message: "Failed to get signals" });
@@ -114,7 +119,8 @@ export async function registerRoutes(
       if (!stock) {
         return res.status(404).json({ message: "Stock not found" });
       }
-      res.json(stock);
+      const livePrice = ALPACA_STOCK_TICKERS.has(ticker) ? (getAlpacaPrice(ticker) ?? stock.price) : stock.price;
+      res.json({ ...stock, price: livePrice, livePrice: ALPACA_STOCK_TICKERS.has(ticker) && getAlpacaPrice(ticker) != null });
     } catch (err) {
       res.status(500).json({ message: "Failed to get stock detail" });
     }
@@ -124,7 +130,12 @@ export async function registerRoutes(
   app.get("/api/scanner/:mode", (req, res) => {
     try {
       const mode = req.params.mode;
-      const stocks = getStockData();
+      const rawStocks = getStockData();
+      // Overlay real Alpaca prices for tracked US stocks
+      const stocks = rawStocks.map(s => {
+        const lp = ALPACA_STOCK_TICKERS.has(s.ticker) ? getAlpacaPrice(s.ticker) : null;
+        return lp != null ? { ...s, price: lp } : s;
+      });
       const rand = seededRandom(42);
 
       if (mode === "penny") {
@@ -633,6 +644,9 @@ export async function registerRoutes(
       res.status(500).json({ message: "Failed to auto-range" });
     }
   });
+
+  // Auto-start the Alpaca price feed on server init so prices are live immediately
+  startAlpacaFeed();
 
   return httpServer;
 }
