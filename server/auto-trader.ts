@@ -927,6 +927,9 @@ function checkCircuitBreaker() {
   } else if (dd >= limit && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`⚠️ CIRCUIT BREAKER | Drawdown ${(dd*100).toFixed(1)}% ≥ ${(limit*100).toFixed(0)}% limit | Paused`);
+  } else if (state.circuitBreakerActive && p.totalValue > 50 && dd < limit) {
+    state.circuitBreakerActive = false;
+    log(`✅ CIRCUIT BREAKER RESET | Portfolio recovered — drawdown ${(dd*100).toFixed(1)}% < ${(limit*100).toFixed(0)}% limit | Trading resumed`);
   }
 }
 
