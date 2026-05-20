@@ -155,6 +155,7 @@ export async function registerRoutes(
           catalystScore: s.catalystScore,
           compositeScore: scorePennyStock(s),
           signal: "HOLD" as "BUY" | "SELL" | "HOLD",
+          livePrice: ALPACA_STOCK_TICKERS.has(s.ticker) && getAlpacaPrice(s.ticker) != null,
         }));
         scored.sort((a, b) => b.compositeScore - a.compositeScore);
         scored.forEach((s, i) => {
@@ -179,6 +180,7 @@ export async function registerRoutes(
           ma50Cross: s.price > s.ma50 ? "Above" : "Below",
           breakoutScore: scoreMomentum(s),
           signal: "HOLD" as "BUY" | "SELL" | "HOLD",
+          livePrice: ALPACA_STOCK_TICKERS.has(s.ticker) && getAlpacaPrice(s.ticker) != null,
         }));
         scored.sort((a, b) => b.breakoutScore - a.breakoutScore);
         scored.forEach((s, i) => {
@@ -202,6 +204,7 @@ export async function registerRoutes(
           volumeSpikeRatio: s.volumeSpikeRatio,
           squeezeScore: scoreSqueeze(s),
           signal: "HOLD" as "BUY" | "SELL" | "HOLD",
+          livePrice: ALPACA_STOCK_TICKERS.has(s.ticker) && getAlpacaPrice(s.ticker) != null,
         }));
         scored.sort((a, b) => b.squeezeScore - a.squeezeScore);
         scored.forEach((s, i) => {
