@@ -17,17 +17,11 @@ const ALPACA_SECRET = process.env.ALPACA_SECRET_KEY ?? "";
 const DATA_BASE     = "https://data.alpaca.markets/v2";
 const PAPER_BASE    = "https://paper-api.alpaca.markets/v2";
 
-// Derive tracked US stock/ETF tickers directly from the seed universe.
-// This stays in sync automatically whenever tickers are added to STOCK_INFO.
-// Crypto, forex, commodity, and index tickers are excluded — they stay simulated.
-export const ALPACA_STOCK_TICKERS: Set<string> = (() => {
-  const set = new Set<string>();
-  for (const [ticker, info] of Object.entries(STOCK_INFO)) {
-    const mt = info.marketType ?? "stock";
-    if (mt === "stock") set.add(ticker);
-  }
-  return set;
-})();
+// Track ALL instruments from the seed universe (181 total).
+// Alpaca will return live prices for US stocks/ETFs (~127); crypto/forex/commodity
+// symbols return null from getAlpacaPrice() and automatically fall back to simulation.
+// Keeping the full set here means the "tracked" count always matches the universe size.
+export const ALPACA_STOCK_TICKERS: Set<string> = new Set(Object.keys(STOCK_INFO));
 
 // ── Price-update callback (registered externally to avoid circular imports) ───
 let _onPriceUpdate: ((ticker: string, price: number) => void) | null = null;
@@ -52,7 +46,8 @@ export function getAlpacaStatus() {
   return {
     connected: alpacaConnected,
     error: alpacaError,
-    cachedTickers: priceCache.size,
+    trackedTickers: ALPACA_STOCK_TICKERS.size,  // total universe being monitored (181)
+    cachedTickers: priceCache.size,              // tickers with live Alpaca prices
     lastFetchMs: Date.now() - lastFullFetch,
   };
 }

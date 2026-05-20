@@ -601,6 +601,23 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/grid/bots/:id/start — (re)start background ticking for a bot
+  app.post("/api/grid/bots/:id/start", (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
+      const bot = getGridBot(id);
+      if (!bot) return res.status(404).json({ message: "Bot not found" });
+      if (bot.status !== "active") {
+        return res.status(400).json({ message: `Bot is ${bot.status}. Only active bots can be started.` });
+      }
+      startGridBotLoop(id);
+      res.json({ success: true, id, message: "Background loop started" });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to start bot loop" });
+    }
+  });
+
   // POST /api/grid/bots/:id/toggle — pause/resume a bot
   app.post("/api/grid/bots/:id/toggle", (req, res) => {
     try {
