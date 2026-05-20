@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { Search, Trophy, Skull, TrendingUp, TrendingDown } from "lucide-react";
+import { Search, Trophy, Skull, TrendingUp, TrendingDown, Download } from "lucide-react";
 import { Link } from "wouter";
 
 interface TradesResponse {
@@ -157,9 +157,53 @@ export default function TradeLog() {
   const bestTrade = trades.filter(t => t.pnl !== null).sort((a, b) => (b.pnl || 0) - (a.pnl || 0))[0];
   const worstTrade = trades.filter(t => t.pnl !== null).sort((a, b) => (a.pnl || 0) - (b.pnl || 0))[0];
 
+  const closedTrades = trades.filter(t => t.status === "closed");
+
+  function exportCsv() {
+    const headers = ["Ticker", "Strategy", "Entry Price", "Exit Price", "Shares", "P&L", "P&L %", "Opened At", "Closed At", "Status"];
+    const rows = closedTrades.map(t => {
+      const entryPrice = t.price ?? 0;
+      const exitPrice = t.pnl !== null && t.shares ? ((t.pnl + entryPrice * t.shares) / t.shares) : null;
+      const pnlPct = t.pnl !== null && entryPrice && t.shares ? (t.pnl / (entryPrice * t.shares)) * 100 : null;
+      return [
+        t.ticker,
+        "N/A",
+        entryPrice.toFixed(2),
+        exitPrice !== null ? exitPrice.toFixed(2) : "",
+        (t.shares ?? 0).toFixed(4),
+        t.pnl !== null ? t.pnl.toFixed(2) : "",
+        pnlPct !== null ? pnlPct.toFixed(2) + "%" : "",
+        t.openedAt ? new Date(t.openedAt).toLocaleString() : "",
+        t.closedAt ? new Date(t.closedAt).toLocaleString() : "",
+        t.status,
+      ];
+    });
+    const csv = [headers, ...rows].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trade-history-${new Date().toISOString().split("T")[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="p-4 md:p-6 space-y-4">
-      <h1 className="text-lg font-semibold text-foreground">Trade Log</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-foreground">Trade Log</h1>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 text-xs gap-1.5"
+          onClick={exportCsv}
+          disabled={closedTrades.length === 0}
+          data-testid="export-csv"
+        >
+          <Download className="w-3.5 h-3.5" />
+          Export CSV
+        </Button>
+      </div>
 
       {/* Top stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
