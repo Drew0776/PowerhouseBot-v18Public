@@ -111,15 +111,15 @@ export default function Dashboard() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
               <StatCard
                 label="Total Return"
-                value={`${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%`}
-                sub={`$${(portfolioValue - 100).toFixed(2)} profit`}
-                color={pnlColor(totalReturn)}
+                value={totalTrades === 0 ? "—" : `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%`}
+                sub={totalTrades === 0 ? "no trades yet" : `$${(portfolioValue - 100).toFixed(2)} profit`}
+                color={totalTrades === 0 ? "#9e9e9e" : pnlColor(totalReturn)}
               />
               <StatCard
                 label="Win Rate"
-                value={`${winRate}%`}
+                value={totalTrades === 0 ? "0%" : `${winRate}%`}
                 sub={totalTrades > 0 ? `${totalTrades} total trades` : "no trades yet"}
-                color={winRate >= 55 ? "#00e676" : winRate >= 45 ? "#ffd54f" : "#ff1744"}
+                color={totalTrades === 0 ? "#9e9e9e" : winRate >= 55 ? "#00e676" : winRate >= 45 ? "#ffd54f" : "#ff1744"}
               />
               <StatCard
                 label="Profit Factor"

@@ -7,19 +7,22 @@ interface EquityChartProps {
 }
 
 export default function EquityChart({ data }: EquityChartProps) {
-  const chartData = data.map((d, i) => {
-    const date = new Date(d.timestamp);
-    // Simulated SPY benchmark: starts at 100, grows 0.03% per point
-    const spyValue = 100 * (1 + 0.0003 * i);
-    return {
-      time: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      value: d.value,
-      spy: Math.round(spyValue * 100) / 100,
-    };
-  });
+  const isEmpty = data.length === 0;
+
+  const chartData = isEmpty
+    ? [{ time: "Start", value: 100, spy: 100 }, { time: "Now", value: 100, spy: 100 }]
+    : data.map((d, i) => {
+        const date = new Date(d.timestamp);
+        const spyValue = 100 * (1 + 0.0003 * i);
+        return {
+          time: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          value: d.value,
+          spy: Math.round(spyValue * 100) / 100,
+        };
+      });
 
   // If only 1 data point, add a starting point
-  if (chartData.length === 1) {
+  if (!isEmpty && chartData.length === 1) {
     chartData.unshift({ time: "Start", value: 100, spy: 100 });
   }
 
@@ -38,6 +41,11 @@ export default function EquityChart({ data }: EquityChartProps) {
           </div>
         </div>
       </div>
+      {isEmpty && (
+        <div className="flex items-center justify-center gap-1.5 mb-2">
+          <span className="text-[10px] text-zinc-500 font-mono">No trades yet — showing starting value</span>
+        </div>
+      )}
       <ResponsiveContainer width="100%" height={220}>
         <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -15, bottom: 0 }}>
           <defs>
