@@ -629,6 +629,7 @@ let state: AutoTraderState = {
 
 let wins = 0, losses = 0, totalWinAmt = 0, totalLossAmt = 0;
 let _tickInterval: ReturnType<typeof setInterval> | null = null;
+let _equitySnapshotInterval: ReturnType<typeof setInterval> | null = null;
 const cooldowns = new Map<string, number>();
 const dailyStart = { value: 100, tick: 0, dateKey: '' }; // V17: dateKey tracks calendar day for daily P&L reset
 const pnlHistory: number[] = [];
@@ -1272,6 +1273,16 @@ export function startAutoTrader() {
   // V19: Server-side background tick loop — engine runs every 2s regardless of browser tab
   if (_tickInterval) clearInterval(_tickInterval);
   _tickInterval = setInterval(() => { if (state.isRunning) autoTraderTick(); }, 2000);
+
+  // Task #18: Periodic equity snapshot every 5 minutes so the equity curve shows
+  // intra-session movement, not just step-jumps at trade exits.
+  if (_equitySnapshotInterval) clearInterval(_equitySnapshotInterval);
+  _equitySnapshotInterval = setInterval(() => {
+    if (!state.isRunning) return;
+    const snap = storage.getPortfolio();
+    storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: snap.totalValue });
+  }, 5 * 60 * 1000);
+
   persistState(); // persist isRunning=true so server restart can auto-resume
 
   log(`🚀 V19 LIVE | $${p.totalValue.toFixed(2)} | Alpaca REAL prices | ServerTick | AutoResume | StatePersist`);
@@ -1344,6 +1355,7 @@ function restoreState() {
 
 export function stopAutoTrader() {
   if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+  if (_equitySnapshotInterval) { clearInterval(_equitySnapshotInterval); _equitySnapshotInterval = null; }
   state.isRunning = false;
   persistState(); // save including isRunning: false
   stopAlpacaFeed(); // V18: stop polling
@@ -1369,6 +1381,7 @@ export function isAutoTraderRunning(): boolean {
 export function resetAutoTraderState() {
   // Clear background tick loop first
   if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+  if (_equitySnapshotInterval) { clearInterval(_equitySnapshotInterval); _equitySnapshotInterval = null; }
   // Stop the engine if running
   if (state.isRunning) {
     state.isRunning = false;
