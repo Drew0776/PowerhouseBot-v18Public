@@ -626,6 +626,11 @@ export async function registerRoutes(
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const bot = toggleGridBot(id, status);
       if (!bot) return res.status(404).json({ message: "Bot not found" });
+      if (status === "paused") {
+        stopGridBotLoop(id);
+      } else if (status === "active") {
+        startGridBotLoop(id);
+      }
       res.json(bot);
     } catch (err) {
       res.status(500).json({ message: "Failed to toggle bot" });
