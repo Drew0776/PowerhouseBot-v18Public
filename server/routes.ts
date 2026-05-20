@@ -520,6 +520,7 @@ export async function registerRoutes(
     upperPrice: z.number().positive(),
     gridCount: z.number().int().min(2).max(50),
     totalInvestment: z.number().positive(),
+    stopBufferPct: z.number().min(0).max(0.5).optional(),
   });
 
   app.post("/api/grid/bots", (req, res) => {
@@ -528,7 +529,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid bot config", errors: parsed.error.errors });
       }
-      const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment } = parsed.data;
+      const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct } = parsed.data;
 
       if (lowerPrice >= upperPrice) {
         return res.status(400).json({ message: "Lower price must be below upper price" });
@@ -568,7 +569,7 @@ export async function registerRoutes(
         openedAt: new Date().toISOString(),
       });
 
-      const bot = createGridBot({ ticker, lowerPrice, upperPrice, gridCount, totalInvestment });
+      const bot = createGridBot({ ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct });
       res.json(bot);
     } catch (err) {
       res.status(500).json({ message: "Failed to create grid bot" });

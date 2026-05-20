@@ -269,12 +269,13 @@ export interface UserSettings {
 export const gridBots = sqliteTable("grid_bots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   ticker: text("ticker").notNull(),
-  status: text("status").notNull().default("active"), // "active" | "paused" | "stopped"
+  status: text("status").notNull().default("active"), // "active" | "paused" | "stopped" | "stopped_range_exit"
   lowerPrice: real("lower_price").notNull(),
   upperPrice: real("upper_price").notNull(),
   gridCount: integer("grid_count").notNull(),
   totalInvestment: real("total_investment").notNull(),
   profitPerGrid: real("profit_per_grid").notNull(), // theoretical % profit per grid step
+  stopBufferPct: real("stop_buffer_pct").notNull().default(0.05), // range-exit stop buffer (e.g. 0.05 = 5%)
   createdAt: text("created_at").notNull(),
   stoppedAt: text("stopped_at"),
   realizedPnl: real("realized_pnl").notNull().default(0),
