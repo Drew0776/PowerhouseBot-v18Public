@@ -325,9 +325,12 @@ export async function registerRoutes(
   // market data (getStockByTicker). Any client-supplied price is ignored so
   // callers cannot forge entry prices and mint arbitrary profits on close.
   const MAX_SHARES = 1_000_000;
+  // Only "buy" is supported for opening positions; existing positions are
+  // closed via POST /api/trades/:id/close. Naked sells would let a caller
+  // mint cash on close (no short-sell model exists), so they are rejected.
   const tradeSchema = z.object({
     ticker: z.string().min(1).max(16).regex(/^[A-Za-z0-9.\-]+$/, "invalid ticker"),
-    action: z.enum(["buy", "sell"]),
+    action: z.literal("buy"),
     shares: z.number().positive().max(MAX_SHARES),
     // price is accepted for backward-compat but intentionally ignored
     price: z.number().positive().optional(),
@@ -337,6 +340,12 @@ export async function registerRoutes(
 
   app.post("/api/trades", (req, res) => {
     try {
+      // Reject sell explicitly with a clear message before generic validation.
+      if (req.body && req.body.action && req.body.action !== "buy") {
+        return res.status(400).json({
+          message: "Only buy trades may be opened via this endpoint. Close an existing position via POST /api/trades/:id/close.",
+        });
+      }
       const parsed = tradeSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid trade data", errors: parsed.error.errors });
@@ -358,12 +367,10 @@ export async function registerRoutes(
 
       const total = Math.round(shares * execPrice * 100) / 100;
 
-      // Check if we have enough cash for buy
-      if (action === "buy") {
-        const portfolio = storage.getPortfolio();
-        if (total > portfolio.cash) {
-          return res.status(400).json({ message: `Insufficient cash. Available: $${portfolio.cash.toFixed(2)}` });
-        }
+      // Check if we have enough cash for buy (only buys reach here).
+      const portfolio = storage.getPortfolio();
+      if (total > portfolio.cash) {
+        return res.status(400).json({ message: `Insufficient cash. Available: $${portfolio.cash.toFixed(2)}` });
       }
 
       const trade = storage.createTrade({
