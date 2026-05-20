@@ -167,33 +167,37 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
 
       {/* ── Mobile card layout (< md) ── */}
       <div className="block md:hidden space-y-2">
-        {sorted.map((row, i) => {
-          const tickerCol = mobileCardCols[0];
-          const priceCol  = mobileCardCols[1];
-          const metric1   = mobileCardCols[2];
-          const metric2   = mobileCardCols[3];
-          const signalCol = visibleCols.find(c => c.key === "signal");
+        {(() => {
+          // Resolve columns by key once — stable across rows
+          const tickerCol     = visibleCols.find(c => c.key === "ticker");
+          const priceCol      = visibleCols.find(c => c.key === "price");
+          const signalCol     = visibleCols.find(c => c.key === "signal");
+          const scoreCol      = visibleCols.find(c => c.key === "score");
+          // First prioritised metric that isn't rank / ticker / price / signal / score
+          const primaryMetric = mobileCardCols.find(
+            c => !["rank", "ticker", "price", "signal", "score"].includes(c.key)
+          );
 
-          return (
+          return sorted.map((row, i) => (
             <div
               key={i}
               className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 flex items-center justify-between gap-2"
             >
-              {/* Left: ticker + price */}
+              {/* Left: ticker + signal, then price + day metric */}
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex items-center gap-1.5">
                   {tickerCol && safeRender(tickerCol, row)}
                   {signalCol && safeRender(signalCol, row)}
                 </div>
-                <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+                <div className="flex items-center gap-2">
                   {priceCol && safeRender(priceCol, row)}
-                  {metric1 && <span>{safeRender(metric1, row)}</span>}
+                  {primaryMetric && <span>{safeRender(primaryMetric, row)}</span>}
                 </div>
               </div>
 
-              {/* Right: score metric + trade button */}
+              {/* Right: score bar + trade button */}
               <div className="flex items-center gap-2 shrink-0">
-                {metric2 && <span>{safeRender(metric2, row)}</span>}
+                {scoreCol && <span>{safeRender(scoreCol, row)}</span>}
                 <Button
                   size="sm"
                   variant="secondary"
@@ -205,8 +209,8 @@ export function ScannerTable<T>({ data, columns, getPrice, getTicker, isLoading 
                 </Button>
               </div>
             </div>
-          );
-        })}
+          ));
+        })()}
         {sorted.length === 0 && (
           <div className="text-center py-8 text-zinc-500 text-xs">No results matching your filters</div>
         )}

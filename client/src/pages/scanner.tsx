@@ -44,7 +44,7 @@ function PennyTab() {
     { key: "si",       label: "SI %",     render: (r: PennyStockRow) => <span className="font-mono tabular-nums" style={{ color: (r.shortInterestPct ?? 0) > 15 ? "#ff1744" : "#ffd740" }}>{sf(r.shortInterestPct)}%</span>, sortValue: (r: PennyStockRow) => r.shortInterestPct ?? 0 },
     { key: "vol",      label: "VolSpike", render: (r: PennyStockRow) => <span className="font-mono tabular-nums" style={{ color: (r.volumeSpikeRatio ?? 0) > 2 ? "#00e676" : "inherit" }}>{sf(r.volumeSpikeRatio, 1)}x</span>, sortValue: (r: PennyStockRow) => r.volumeSpikeRatio ?? 0, mobilePriority: 4 },
     { key: "catalyst", label: "Catalyst", render: (r: PennyStockRow) => <ScoreBar value={r.catalystScore} />,                                                                          sortValue: (r: PennyStockRow) => r.catalystScore ?? 0 },
-    { key: "score",    label: "Score",    render: (r: PennyStockRow) => <ScoreBar value={r.compositeScore} />,                                                                         sortValue: (r: PennyStockRow) => r.compositeScore ?? 0 },
+    { key: "score",    label: "Score",    render: (r: PennyStockRow) => <ScoreBar value={r.compositeScore} />,                                                                         sortValue: (r: PennyStockRow) => r.compositeScore ?? 0,  mobilePriority: 5 },
     { key: "signal",   label: "Signal",   render: (r: PennyStockRow) => <SignalBadge signal={r.signal ?? "HOLD"} />,                                                                   sortValue: (r: PennyStockRow) => r.signal === "BUY" ? 3 : r.signal === "HOLD" ? 2 : 1 },
   ];
 
@@ -66,7 +66,7 @@ function MomentumTab() {
     { key: "vol",    label: "Vol",     render: (r: MomentumRow) => <span className="font-mono tabular-nums" style={{ color: (r.volumeSpikeRatio ?? 0) > 2 ? "#00e676" : "inherit" }}>{sf(r.volumeSpikeRatio, 1)}x</span>, sortValue: (r: MomentumRow) => r.volumeSpikeRatio ?? 0 },
     { key: "ma20",   label: "20MA",    render: (r: MomentumRow) => <span className="text-[9px] font-bold" style={{ color: r.ma20Cross === "Above" ? "#00e676" : "#ff5252" }}>{r.ma20Cross === "Above" ? "↑" : "↓"}</span>, sortValue: (r: MomentumRow) => r.ma20Cross === "Above" ? 1 : 0 },
     { key: "ma50",   label: "50MA",    render: (r: MomentumRow) => <span className="text-[9px] font-bold" style={{ color: r.ma50Cross === "Above" ? "#00e676" : "#ff5252" }}>{r.ma50Cross === "Above" ? "↑" : "↓"}</span>, sortValue: (r: MomentumRow) => r.ma50Cross === "Above" ? 1 : 0 },
-    { key: "score",  label: "Breakout",render: (r: MomentumRow) => <ScoreBar value={r.breakoutScore} />,                                                                      sortValue: (r: MomentumRow) => r.breakoutScore ?? 0 },
+    { key: "score",  label: "Breakout",render: (r: MomentumRow) => <ScoreBar value={r.breakoutScore} />,                                                                      sortValue: (r: MomentumRow) => r.breakoutScore ?? 0,    mobilePriority: 5 },
     { key: "signal", label: "Signal",  render: (r: MomentumRow) => <SignalBadge signal={r.signal ?? "HOLD"} />,                                                               sortValue: (r: MomentumRow) => r.signal === "BUY" ? 3 : 2 },
   ];
 
@@ -86,7 +86,7 @@ function SqueezeTab() {
     { key: "ctb",    label: "CTB %",    render: (r: SqueezeRow) => <span className="font-mono tabular-nums text-[#ffd740]">{sf(r.costToBorrow, 1)}%</span>,                    sortValue: (r: SqueezeRow) => r.costToBorrow ?? 0 },
     { key: "float",  label: "Float M",  render: (r: SqueezeRow) => <span className="font-mono tabular-nums text-zinc-400">{sf(r.floatShares, 0)}</span>,                       sortValue: (r: SqueezeRow) => r.floatShares ?? 999 },
     { key: "vol",    label: "VolSpike", render: (r: SqueezeRow) => <span className="font-mono tabular-nums" style={{ color: (r.volumeSpikeRatio ?? 0) > 2 ? "#00e676" : "inherit" }}>{sf(r.volumeSpikeRatio, 1)}x</span>, sortValue: (r: SqueezeRow) => r.volumeSpikeRatio ?? 0 },
-    { key: "score",  label: "Squeeze",  render: (r: SqueezeRow) => <ScoreBar value={r.squeezeScore} />,                                                                        sortValue: (r: SqueezeRow) => r.squeezeScore ?? 0 },
+    { key: "score",  label: "Squeeze",  render: (r: SqueezeRow) => <ScoreBar value={r.squeezeScore} />,                                                                        sortValue: (r: SqueezeRow) => r.squeezeScore ?? 0,     mobilePriority: 5 },
     { key: "signal", label: "Signal",   render: (r: SqueezeRow) => <SignalBadge signal={r.signal ?? "HOLD"} />,                                                                sortValue: (r: SqueezeRow) => r.signal === "BUY" ? 3 : 2 },
   ];
 
@@ -108,7 +108,7 @@ function OptionsTab() {
     { key: "premium", label: "Prem",      render: (r: OptionsFlowRow) => <span className="font-mono tabular-nums text-[#ffd740]">${sf(r.premium)}</span>,                        sortValue: (r: OptionsFlowRow) => r.premium ?? 0 },
     { key: "voloi",   label: "Vol/OI",    render: (r: OptionsFlowRow) => <span className="font-mono tabular-nums" style={{ color: (r.volumeVsOI ?? 0) > 3 ? "#00e676" : "inherit" }}>{sf(r.volumeVsOI, 1)}x</span>, sortValue: (r: OptionsFlowRow) => r.volumeVsOI ?? 0 },
     { key: "sent",    label: "Sent",      render: (r: OptionsFlowRow) => <span className="text-[9px] font-bold" style={{ color: r.sentiment === "Bullish" ? "#00e676" : "#ff1744" }}>{r.sentiment === "Bullish" ? "Bull" : "Bear"}</span>, sortValue: (r: OptionsFlowRow) => r.sentiment === "Bullish" ? 1 : 0 },
-    { key: "score",   label: "Flow",      render: (r: OptionsFlowRow) => <ScoreBar value={r.flowScore} />,                                                                       sortValue: (r: OptionsFlowRow) => r.flowScore ?? 0 },
+    { key: "score",   label: "Flow",      render: (r: OptionsFlowRow) => <ScoreBar value={r.flowScore} />,                                                                       sortValue: (r: OptionsFlowRow) => r.flowScore ?? 0,      mobilePriority: 5 },
     { key: "signal",  label: "Signal",    render: (r: OptionsFlowRow) => <SignalBadge signal={r.signal ?? "HOLD"} />,                                                            sortValue: (r: OptionsFlowRow) => r.signal === "BUY" ? 3 : 2 },
   ];
 
