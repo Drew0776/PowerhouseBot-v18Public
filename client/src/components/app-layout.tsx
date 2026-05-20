@@ -36,7 +36,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <PowerhouseLogo />
         <div className="flex flex-col leading-none">
           <span className="text-sm font-semibold text-foreground tracking-tight">Powerhouse</span>
-          <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">V18 Trading Bot</span>
+          <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Trading Bot</span>
         </div>
       </div>
 
@@ -145,7 +145,7 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
             <PowerhouseLogo />
             <div className="flex flex-col leading-none">
               <span className="text-sm font-semibold text-white tracking-tight">Powerhouse</span>
-              <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">V18 Trading Bot</span>
+              <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">Trading Bot</span>
             </div>
           </div>
           <button
@@ -240,7 +240,7 @@ function MobileTopBar({ onMenuOpen }: { onMenuOpen: () => void }) {
           <span className="text-[13px] font-semibold text-white leading-tight">
             {currentPage?.label ?? "Powerhouse"}
           </span>
-          <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-wider">V18 Bot</span>
+          <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-wider">Trading Bot</span>
         </div>
       </div>
 
