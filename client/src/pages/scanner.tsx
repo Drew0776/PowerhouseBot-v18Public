@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+
 import { ScannerTable, SignalBadge, PctCell, ScoreBar } from "@/components/scanner-table";
 import { Link } from "wouter";
 import type { PennyStockRow, MomentumRow, SqueezeRow, OptionsFlowRow } from "@shared/schema";
@@ -135,13 +136,15 @@ function OptionsTab() {
 // ── Main Scanner page ─────────────────────────────────────────────────────────
 export default function Scanner() {
   const [activeTab, setActiveTab] = useState<TabId>("penny");
+  const { data: universeData } = useQuery<{ count: number }>({ queryKey: ["/api/universe/count"], staleTime: 60_000 });
+  const universeCount = universeData?.count ?? "—";
 
   return (
     <div className="flex flex-col bg-[#0d0f12] min-h-screen">
       {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-lg font-bold text-white tracking-tight">Scanner</h1>
-        <p className="text-[11px] text-zinc-500 mt-0.5">128 markets · 4 strategies · real-time signals</p>
+        <p className="text-[11px] text-zinc-500 mt-0.5">{universeCount} markets · 4 strategies · real-time signals</p>
       </div>
 
       {/* Tabs — horizontally scrollable, no clip */}

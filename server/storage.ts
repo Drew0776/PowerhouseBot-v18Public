@@ -286,6 +286,14 @@ export class DatabaseStorage implements IStorage {
 
 export const storage = new DatabaseStorage();
 
+/** Bug 8 fix: Safe helper — no unsafe cast needed in index.ts */
+export function getEngineStateJson(): string | null {
+  try {
+    const row = sqlite.prepare("SELECT state_json FROM engine_state WHERE id = 1").get() as { state_json: string } | undefined;
+    return row?.state_json ?? null;
+  } catch { return null; }
+}
+
 // Seed initial equity curve point if empty
 if (storage.getEquityCurve().length === 0) {
   storage.addEquityCurvePoint({
