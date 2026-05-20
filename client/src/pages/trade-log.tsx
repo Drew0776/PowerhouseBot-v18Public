@@ -21,7 +21,6 @@ interface TradesResponse {
 }
 
 function CalendarHeatmap({ trades }: { trades: Trade[] }) {
-  // Build daily P&L map for last 30 days
   const dailyPnl = useMemo(() => {
     const map = new Map<string, number>();
     for (const t of trades) {
@@ -41,33 +40,43 @@ function CalendarHeatmap({ trades }: { trades: Trade[] }) {
     days.push({ date: dateStr, pnl: dailyPnl.get(dateStr) || 0, dayOfWeek: d.getDay() });
   }
 
+  const hasActivity = dailyPnl.size > 0;
+
   return (
     <div className="rounded-lg border border-border p-4" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
       <h3 className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-2">Daily P&L Heatmap</h3>
-      <div className="flex flex-wrap gap-1">
-        {days.map(d => {
-          const color = d.pnl > 0 ? `rgba(0,230,118,${Math.min(1, d.pnl / 2)})` : d.pnl < 0 ? `rgba(255,23,68,${Math.min(1, Math.abs(d.pnl) / 2)})` : "hsl(220 15% 13%)";
-          return (
-            <div
-              key={d.date}
-              className="w-5 h-5 rounded-sm"
-              style={{ backgroundColor: color }}
-              title={`${d.date}: ${d.pnl >= 0 ? "+" : ""}$${(d.pnl ?? 0).toFixed(2)}`}
-            />
-          );
-        })}
-      </div>
-      <div className="flex items-center gap-3 mt-2">
-        <span className="text-[9px] text-muted-foreground">Loss</span>
-        <div className="flex gap-0.5">
-          <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(255,23,68,0.8)" }} />
-          <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(255,23,68,0.3)" }} />
-          <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "hsl(220 15% 13%)" }} />
-          <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(0,230,118,0.3)" }} />
-          <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(0,230,118,0.8)" }} />
+      {!hasActivity ? (
+        <div className="flex items-center justify-center h-8 text-[11px] text-muted-foreground font-mono">
+          No trades in the last 35 days
         </div>
-        <span className="text-[9px] text-muted-foreground">Gain</span>
-      </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-1">
+            {days.map(d => {
+              const color = d.pnl > 0 ? `rgba(0,230,118,${Math.min(1, d.pnl / 2)})` : d.pnl < 0 ? `rgba(255,23,68,${Math.min(1, Math.abs(d.pnl) / 2)})` : "hsl(220 15% 13%)";
+              return (
+                <div
+                  key={d.date}
+                  className="w-5 h-5 rounded-sm"
+                  style={{ backgroundColor: color }}
+                  title={`${d.date}: ${d.pnl >= 0 ? "+" : ""}$${(d.pnl ?? 0).toFixed(2)}`}
+                />
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-3 mt-2">
+            <span className="text-[9px] text-muted-foreground">Loss</span>
+            <div className="flex gap-0.5">
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(255,23,68,0.8)" }} />
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(255,23,68,0.3)" }} />
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "hsl(220 15% 13%)" }} />
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(0,230,118,0.3)" }} />
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: "rgba(0,230,118,0.8)" }} />
+            </div>
+            <span className="text-[9px] text-muted-foreground">Gain</span>
+          </div>
+        </>
+      )}
     </div>
   );
 }

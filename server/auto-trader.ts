@@ -1302,3 +1302,59 @@ export function getAutoTraderState(): AutoTraderState {
 export function isAutoTraderRunning(): boolean {
   return state.isRunning;
 }
+
+export function resetAutoTraderState() {
+  // Stop the engine (persists stale state first — we'll overwrite it below)
+  if (state.isRunning) {
+    state.isRunning = false;
+    stopAlpacaFeed();
+  }
+
+  // Zero all counters and clear positions/history
+  state.totalTicks          = 0;
+  state.totalTrades         = 0;
+  state.openPositions       = [];
+  state.closedTrades        = 0;
+  state.winRate             = 0;
+  state.totalPnl            = 0;
+  state.dailyPnl            = 0;
+  state.circuitBreakerActive = false;
+  state.regime              = "unknown";
+  state.bestTrade           = null;
+  state.lastScan            = [];
+  state.log                 = [];
+  state.eventFilterActive   = false;
+  state.currentEvent        = null;
+  state.totalSlippageCost   = 0;
+  state.roiPct              = 0;
+  state.pnlPerTick          = 0;
+  state.tradesPerHundredTicks = 0;
+  state.sessionPeak         = 100;
+  state.t1HitRate           = 0;
+  state.maxHoldRate         = 0;
+  state.capitalUtilization  = 0;
+  state.stats = { avgWin: 0, avgLoss: 0, profitFactor: 0, expectancy: 0, sharpeApprox: 0, totalWinAmount: 0, totalLossAmount: 0 };
+
+  // Reset local accumulators
+  wins = 0; losses = 0; totalWinAmt = 0; totalLossAmt = 0;
+  t1HitCount = 0; maxHoldCount = 0;
+  sessionStartValue = 100;
+  sessionPeak = 100;
+  pnlHistory.length = 0;
+
+  // Clear simulation maps
+  _prices.clear(); _seeds.clear(); _mtf.clear();
+  _trendStartTick.clear(); _hotTickers.clear();
+  bullishTickers.clear(); cooldowns.clear();
+
+  // Reset daily tracking
+  dailyStart.value = 100;
+  dailyStart.tick  = 0;
+  dailyStart.dateKey = '';
+
+  // Remove persisted state so next restart begins clean
+  try {
+    const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
+    sqlite.prepare("DELETE FROM engine_state WHERE id = 1").run();
+  } catch (_e) { /* non-fatal */ }
+}

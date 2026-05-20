@@ -20,6 +20,7 @@ import {
   autoTraderTick,
   startAutoTrader,
   stopAutoTrader,
+  resetAutoTraderState,
   getAutoTraderState,
   isAutoTraderRunning,
   scanForBreakouts,
@@ -474,6 +475,7 @@ export async function registerRoutes(
       // Seed fresh equity point
       storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: 100 });
       stopAutoTrader();
+      resetAutoTraderState();
       res.json({ message: "Portfolio reset to $100. All trades cleared.", cash: 100 });
     } catch (err) {
       res.status(500).json({ message: "Reset failed", error: String(err) });
