@@ -1,7 +1,7 @@
-import { Switch, Route, Router } from "wouter";
+import { Switch, Route, Router, Redirect } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
-import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient, apiRequest } from "./lib/queryClient";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
@@ -12,9 +12,10 @@ import StockDetail from "@/pages/stock-detail";
 import Settings from "@/pages/settings";
 import GridBotPage from "@/pages/grid-bot";
 import AutoTraderPage from "@/pages/auto-trader";
+import Login from "@/pages/login";
 import AppLayout from "@/components/app-layout";
 
-function AppRouter() {
+function AuthenticatedApp() {
   return (
     <AppLayout>
       <Switch>
@@ -28,6 +29,33 @@ function AppRouter() {
         <Route component={NotFound} />
       </Switch>
     </AppLayout>
+  );
+}
+
+function AppRouter() {
+  const { data: authData, isLoading } = useQuery<{ authenticated: boolean }>({
+    queryKey: ["/api/auth/check"],
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  const isAuthenticated = authData?.authenticated === true;
+
+  return (
+    <Switch>
+      <Route path="/login" component={Login} />
+      <Route>
+        {isAuthenticated ? <AuthenticatedApp /> : <Redirect to="/login" />}
+      </Route>
+    </Switch>
   );
 }
 
