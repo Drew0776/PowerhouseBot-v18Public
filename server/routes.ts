@@ -298,7 +298,8 @@ export async function registerRoutes(
       const status = getAlpacaStatus();
       res.json({ success: true, ...status });
     } catch (err: unknown) {
-      res.status(500).json({ success: false, error: String(err) });
+      console.error("[/api/alpaca/refresh] error:", err);
+      res.status(500).json({ success: false, error: "Failed to refresh Alpaca feed" });
     }
   });
 
@@ -423,7 +424,7 @@ export async function registerRoutes(
   // POST /api/trades/:id/close — close a position
   app.post("/api/trades/:id/close", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       if (isNaN(id)) {
         return res.status(400).json({ message: "Invalid trade ID" });
       }
@@ -521,7 +522,8 @@ export async function registerRoutes(
       const result = runWalkForwardBacktest(ticks);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ message: "Backtest failed", error: String(err) });
+      console.error("[/api/auto-trader/backtest] error:", err);
+      res.status(500).json({ message: "Backtest failed" });
     }
   });
 
@@ -539,7 +541,8 @@ export async function registerRoutes(
       resetAutoTraderState();
       res.json({ message: "Portfolio reset to $100. All trades cleared.", cash: 100 });
     } catch (err) {
-      res.status(500).json({ message: "Reset failed", error: String(err) });
+      console.error("[/api/portfolio/reset] error:", err);
+      res.status(500).json({ message: "Reset failed" });
     }
   });
 
@@ -558,7 +561,7 @@ export async function registerRoutes(
   // GET /api/grid/bots/:id — full summary for one bot
   app.get("/api/grid/bots/:id", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const summary = getGridBotSummary(id);
       if (!summary) return res.status(404).json({ message: "Bot not found" });
@@ -634,7 +637,7 @@ export async function registerRoutes(
   // POST /api/grid/bots/:id/tick — advance the simulation by one tick
   app.post("/api/grid/bots/:id/tick", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const order = simulateGridTick(id);
       const summary = getGridBotSummary(id);
@@ -647,7 +650,7 @@ export async function registerRoutes(
   // POST /api/grid/bots/:id/stop — stop a bot
   app.post("/api/grid/bots/:id/stop", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const bot = stopGridBot(id);
       if (!bot) return res.status(404).json({ message: "Bot not found" });
@@ -660,7 +663,7 @@ export async function registerRoutes(
   // POST /api/grid/bots/:id/start — (re)start background ticking for a bot
   app.post("/api/grid/bots/:id/start", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const bot = getGridBot(id);
       if (!bot) return res.status(404).json({ message: "Bot not found" });
@@ -677,7 +680,7 @@ export async function registerRoutes(
   // POST /api/grid/bots/:id/toggle — pause/resume a bot
   app.post("/api/grid/bots/:id/toggle", requireAuth, (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       const { status } = req.body as { status: "active" | "paused" };
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
       const bot = toggleGridBot(id, status);

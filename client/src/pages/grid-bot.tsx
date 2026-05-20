@@ -462,6 +462,7 @@ export default function GridBotPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [activeTab, setActiveTab] = useState<"grid" | "orders">("grid");
   const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const botsRef = useRef<GridBot[]>([]);
 
   // Fetch all bots
   const { data: bots = [] } = useQuery<GridBot[]>({
@@ -515,19 +516,25 @@ export default function GridBotPage() {
     },
   });
 
-  // Auto-tick when bot is active (every 4s simulate a tick)
+  // Keep latest bots list in a ref so the tick effect can read status without re-running
+  useEffect(() => { botsRef.current = bots; }, [bots]);
+
+  // Auto-tick when bot is active (every 4s simulate a tick).
+  // Depends only on selectedBotId so we don't tear down/recreate the interval
+  // on every 3s poll of the bots list.
   useEffect(() => {
     if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
-    const activeBot = bots.find(b => b.id === selectedBotId && b.status === "active");
-    if (activeBot) {
-      tickIntervalRef.current = setInterval(() => {
-        tickMutation.mutate(activeBot.id);
-      }, 4000);
-    }
+    if (selectedBotId === null) return;
+    tickIntervalRef.current = setInterval(() => {
+      const current = botsRef.current.find(b => b.id === selectedBotId);
+      if (current && current.status === "active") {
+        tickMutation.mutate(selectedBotId);
+      }
+    }, 4000);
     return () => {
       if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
     };
-  }, [selectedBotId, bots]);
+  }, [selectedBotId]);
 
   const selectedBot = bots.find(b => b.id === selectedBotId);
   const availableCash = portfolio?.cash ?? 100;

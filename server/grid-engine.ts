@@ -198,7 +198,7 @@ function closeAllOpenPositions(bot: GridBot, marketPrice: number): void {
   let fillsDelta = 0;
   const nowIso = new Date().toISOString();
   for (const buy of Array.from(openBuys.values())) {
-    const pnl = Math.round((marketPrice - buy.gridPrice) * buy.shares * 100) / 100;
+    const pnl = Math.round((marketPrice - buy.fillPrice) * buy.shares * 100) / 100;
     const total = Math.round(buy.shares * marketPrice * 100) / 100;
     gridDb.insert(gridOrders).values({
       botId: bot.id,

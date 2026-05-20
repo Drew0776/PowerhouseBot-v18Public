@@ -33,7 +33,7 @@ import {
   stopAlpacaFeed,
   getAlpacaStatus,
 } from "./alpaca";
-import type { StockData } from "./seed";
+import type { StockData } from "@shared/schema";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1044,7 +1044,8 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 
   function lAdvance(ticker: string, mt: string, bull: boolean): number {
     const seed = _seeds.get(ticker) ?? getStockByTicker(ticker)?.price ?? 1;
-    const g = lPrices.get(ticker)!;
+    const g = lPrices.get(ticker);
+    if (!g) return seed;
     g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
     const u1 = Math.max(1e-10, g.lcg / 0xffffffff);
     g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
@@ -1174,16 +1175,19 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 
     for (const cand of candidates.slice(0, 2)) {
       if (positions.length >= MAX_POSITIONS) break;
-      const posSize = Math.max(bal * POS_MIN_PCT, Math.min(bal * POS_MAX_PCT, bal * 0.95));
+      // Cap position at 95% of available balance (same as live engine)
+      const posSize = Math.min(bal * 0.95, Math.max(bal * POS_MIN_PCT, bal * POS_MAX_PCT));
       if (posSize < 0.10) continue;
       const shares = posSize / cand.price;
       const sl = slippage(shares, cand.price, cand.mt);
-      bal -= sl;
+      // Match live engine: bake entry slippage into the adjusted entry price
+      // (do NOT also subtract from balance — that would double-count slippage)
+      const adjEntry = cand.price + sl / Math.max(shares, 0.0001);
       if (inIS) isSl += sl; else oosSl += sl;
       lAdvance(cand.ticker, cand.mt, true);
       positions.push({
         ticker: cand.ticker, mt: cand.mt,
-        entry: cand.price + sl / Math.max(shares, 0.0001),
+        entry: adjEntry,
         stop: cand.stop, tp1: cand.tp1, tp2: cand.tp2,
         shares, sharesRem: shares, atr: cand.atr,
         tier1Hit: false, ticks: 0, enteredAt: tick,
