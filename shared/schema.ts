@@ -191,6 +191,7 @@ export interface PennyStockRow {
   catalystScore: number;
   compositeScore: number;
   signal: "BUY" | "SELL" | "HOLD";
+  livePrice?: boolean;
 }
 
 export interface MomentumRow {
@@ -207,6 +208,7 @@ export interface MomentumRow {
   ma50Cross: string;
   breakoutScore: number;
   signal: "BUY" | "SELL" | "HOLD";
+  livePrice?: boolean;
 }
 
 export interface SqueezeRow {
@@ -221,6 +223,7 @@ export interface SqueezeRow {
   volumeSpikeRatio: number;
   squeezeScore: number;
   signal: "BUY" | "SELL" | "HOLD";
+  livePrice?: boolean;
 }
 
 export interface OptionsFlowRow {
