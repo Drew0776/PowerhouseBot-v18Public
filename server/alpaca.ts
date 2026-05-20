@@ -125,9 +125,16 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 export function startAlpacaFeed(): void {
   if (refreshTimer) return; // Already running
   console.log("📡 Alpaca feed starting — fetching real prices...");
-  refreshAllPrices().catch(() => {}); // Initial fetch immediately
+  refreshAllPrices().catch((err: unknown) => {
+    alpacaError = err instanceof Error ? err.message : String(err);
+    alpacaConnected = false;
+    console.error("📡 Alpaca initial fetch failed:", alpacaError);
+  });
   refreshTimer = setInterval(() => {
-    refreshAllPrices().catch(() => {});
+    refreshAllPrices().catch((err: unknown) => {
+      alpacaError = err instanceof Error ? err.message : String(err);
+      alpacaConnected = false;
+    });
   }, 15_000); // Refresh every 15 seconds
 }
 
