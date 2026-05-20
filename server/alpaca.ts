@@ -26,6 +26,16 @@ export const ALPACA_STOCK_TICKERS = new Set([
   "MTSI","GME","AMC","KOSS","PLUG","SPCE","QBTS","ARQQ","BITF","HUT",
   "MSTR","COIN","ASTS","MSAI","AIXI","SAVA","NKTR","PRAX","FFIE","SOLO",
   "VFS","MNTS","ASTR","OPEN","HOOD","COUR","MAPS",
+  // Sector ETFs
+  "QQQ","SPY","XLK","XLF","XLE","XLV","XLI","SOXL","TQQQ","ARKK",
+  // Consumer & Media
+  "NFLX","UBER","ABNB","DIS","SPOT",
+  // Healthcare & Pharma
+  "LLY","UNH","PFE","ABBV","MRNA",
+  // Energy
+  "XOM","CVX","OXY","SLB",
+  // Financials
+  "JPM","BAC","GS","MS","V","MA","PYPL",
 ]);
 
 // ── In-memory price cache ─────────────────────────────────────────────────────

@@ -130,6 +130,57 @@ const STOCK_INFO: Record<string, StockInfo> = {
   MAPS: { name: "WM Technology",          price: 1.85, volatility: 0.095, bias: -0.003, category: "penny",  sector: "Cannabis Tech",     marketCapBillions: 0.18, floatMillions: 55,   shortInterestBase: 30.0, institutionalOwnership: 20,  beta: 4.5 },
 
   // ──────────────────────────────────────────────────────
+  // SECTOR ETFs — broad market + leveraged movers
+  // ──────────────────────────────────────────────────────
+  QQQ:  { name: "Invesco Nasdaq 100 ETF",   price: 475,  volatility: 0.018, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 290,  floatMillions: 610000, shortInterestBase: 0.5,  institutionalOwnership: 55, beta: 1.0 },
+  SPY:  { name: "SPDR S&P 500 ETF",         price: 565,  volatility: 0.014, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 580,  floatMillions: 1020000, shortInterestBase: 0.3, institutionalOwnership: 60, beta: 1.0 },
+  XLK:  { name: "Technology Select SPDR",   price: 225,  volatility: 0.020, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 65,   floatMillions: 290000, shortInterestBase: 0.4,  institutionalOwnership: 62, beta: 1.1 },
+  XLF:  { name: "Financial Select SPDR",    price: 48,   volatility: 0.016, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 38,   floatMillions: 800000, shortInterestBase: 0.3,  institutionalOwnership: 58, beta: 1.0 },
+  XLE:  { name: "Energy Select SPDR",       price: 88,   volatility: 0.022, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 29,   floatMillions: 330000, shortInterestBase: 0.4,  institutionalOwnership: 52, beta: 1.0 },
+  XLV:  { name: "Health Care Select SPDR",  price: 145,  volatility: 0.015, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 35,   floatMillions: 240000, shortInterestBase: 0.3,  institutionalOwnership: 60, beta: 0.9 },
+  XLI:  { name: "Industrial Select SPDR",   price: 135,  volatility: 0.016, bias: 0.001,  category: "momentum", sector: "ETF",          marketCapBillions: 22,   floatMillions: 160000, shortInterestBase: 0.3,  institutionalOwnership: 58, beta: 1.0 },
+  SOXL: { name: "Direxion Semi Bull 3X",    price: 28,   volatility: 0.075, bias: 0.003,  category: "momentum", sector: "Leveraged ETF", marketCapBillions: 8.5,  floatMillions: 300,    shortInterestBase: 8.5,  institutionalOwnership: 28, beta: 3.0 },
+  TQQQ: { name: "ProShares UltraPro QQQ",   price: 72,   volatility: 0.055, bias: 0.002,  category: "momentum", sector: "Leveraged ETF", marketCapBillions: 21,   floatMillions: 290,    shortInterestBase: 6.5,  institutionalOwnership: 30, beta: 2.8 },
+  ARKK: { name: "ARK Innovation ETF",       price: 52,   volatility: 0.038, bias: 0.003,  category: "momentum", sector: "ETF",          marketCapBillions: 8.2,  floatMillions: 158,    shortInterestBase: 14.5, institutionalOwnership: 25, beta: 2.0 },
+
+  // ──────────────────────────────────────────────────────
+  // CONSUMER & MEDIA — high-revenue growth leaders
+  // ──────────────────────────────────────────────────────
+  NFLX: { name: "Netflix Inc",              price: 1040, volatility: 0.030, bias: 0.003,  category: "momentum", sector: "Streaming",     marketCapBillions: 448,  floatMillions: 420,    shortInterestBase: 2.8,  institutionalOwnership: 82, beta: 1.4 },
+  UBER: { name: "Uber Technologies",        price: 78,   volatility: 0.030, bias: 0.003,  category: "momentum", sector: "Mobility",      marketCapBillions: 162,  floatMillions: 2060,   shortInterestBase: 3.5,  institutionalOwnership: 72, beta: 1.5 },
+  ABNB: { name: "Airbnb Inc",               price: 138,  volatility: 0.032, bias: 0.002,  category: "momentum", sector: "Travel Tech",   marketCapBillions: 88,   floatMillions: 625,    shortInterestBase: 4.2,  institutionalOwnership: 68, beta: 1.5 },
+  DIS:  { name: "Walt Disney Co",           price: 104,  volatility: 0.022, bias: 0.001,  category: "momentum", sector: "Entertainment", marketCapBillions: 190,  floatMillions: 1820,   shortInterestBase: 1.8,  institutionalOwnership: 68, beta: 1.1 },
+  SPOT: { name: "Spotify Technology",       price: 590,  volatility: 0.038, bias: 0.004,  category: "momentum", sector: "Music Streaming", marketCapBillions: 118, floatMillions: 192,   shortInterestBase: 5.2,  institutionalOwnership: 72, beta: 1.8 },
+
+  // ──────────────────────────────────────────────────────
+  // HEALTHCARE & PHARMA — defensive + high-beta biotech
+  // ──────────────────────────────────────────────────────
+  LLY:  { name: "Eli Lilly and Co",         price: 840,  volatility: 0.025, bias: 0.002,  category: "momentum", sector: "Pharma",        marketCapBillions: 795,  floatMillions: 950,    shortInterestBase: 1.2,  institutionalOwnership: 82, beta: 0.8 },
+  UNH:  { name: "UnitedHealth Group",        price: 580,  volatility: 0.020, bias: 0.002,  category: "momentum", sector: "Health Ins",    marketCapBillions: 538,  floatMillions: 930,    shortInterestBase: 0.9,  institutionalOwnership: 88, beta: 0.7 },
+  PFE:  { name: "Pfizer Inc",               price: 27,   volatility: 0.022, bias: 0.001,  category: "momentum", sector: "Pharma",        marketCapBillions: 153,  floatMillions: 5690,   shortInterestBase: 1.5,  institutionalOwnership: 72, beta: 0.6 },
+  ABBV: { name: "AbbVie Inc",               price: 196,  volatility: 0.020, bias: 0.002,  category: "momentum", sector: "Pharma",        marketCapBillions: 346,  floatMillions: 1770,   shortInterestBase: 1.1,  institutionalOwnership: 78, beta: 0.8 },
+  MRNA: { name: "Moderna Inc",              price: 34,   volatility: 0.055, bias: 0.001,  category: "momentum", sector: "Biotech",       marketCapBillions: 13.5, floatMillions: 382,    shortInterestBase: 12.5, institutionalOwnership: 65, beta: 2.0 },
+
+  // ──────────────────────────────────────────────────────
+  // ENERGY — oil majors & services
+  // ──────────────────────────────────────────────────────
+  XOM:  { name: "Exxon Mobil Corp",         price: 110,  volatility: 0.018, bias: 0.001,  category: "momentum", sector: "Oil & Gas",     marketCapBillions: 478,  floatMillions: 4300,   shortInterestBase: 0.8,  institutionalOwnership: 62, beta: 0.9 },
+  CVX:  { name: "Chevron Corp",             price: 148,  volatility: 0.018, bias: 0.001,  category: "momentum", sector: "Oil & Gas",     marketCapBillions: 264,  floatMillions: 1780,   shortInterestBase: 0.9,  institutionalOwnership: 65, beta: 0.9 },
+  OXY:  { name: "Occidental Petroleum",     price: 43,   volatility: 0.028, bias: 0.002,  category: "momentum", sector: "Oil & Gas",     marketCapBillions: 38,   floatMillions: 880,    shortInterestBase: 3.5,  institutionalOwnership: 62, beta: 1.5 },
+  SLB:  { name: "SLB (Schlumberger)",       price: 40,   volatility: 0.025, bias: 0.002,  category: "momentum", sector: "Oil Services",  marketCapBillions: 57,   floatMillions: 1420,   shortInterestBase: 1.8,  institutionalOwnership: 72, beta: 1.4 },
+
+  // ──────────────────────────────────────────────────────
+  // FINANCIALS — banks & payments
+  // ──────────────────────────────────────────────────────
+  JPM:  { name: "JPMorgan Chase",           price: 248,  volatility: 0.018, bias: 0.002,  category: "momentum", sector: "Banking",       marketCapBillions: 716,  floatMillions: 2880,   shortInterestBase: 0.6,  institutionalOwnership: 72, beta: 1.1 },
+  BAC:  { name: "Bank of America",          price: 46,   volatility: 0.020, bias: 0.001,  category: "momentum", sector: "Banking",       marketCapBillions: 356,  floatMillions: 7720,   shortInterestBase: 0.7,  institutionalOwnership: 68, beta: 1.3 },
+  GS:   { name: "Goldman Sachs",            price: 582,  volatility: 0.022, bias: 0.002,  category: "momentum", sector: "Investment Bank", marketCapBillions: 194, floatMillions: 330,   shortInterestBase: 1.2,  institutionalOwnership: 80, beta: 1.3 },
+  MS:   { name: "Morgan Stanley",           price: 120,  volatility: 0.020, bias: 0.002,  category: "momentum", sector: "Investment Bank", marketCapBillions: 206, floatMillions: 1710,  shortInterestBase: 0.8,  institutionalOwnership: 78, beta: 1.2 },
+  V:    { name: "Visa Inc",                 price: 348,  volatility: 0.016, bias: 0.002,  category: "momentum", sector: "Payments",      marketCapBillions: 716,  floatMillions: 2050,   shortInterestBase: 0.5,  institutionalOwnership: 88, beta: 1.0 },
+  MA:   { name: "Mastercard Inc",           price: 548,  volatility: 0.016, bias: 0.002,  category: "momentum", sector: "Payments",      marketCapBillions: 524,  floatMillions: 960,    shortInterestBase: 0.5,  institutionalOwnership: 90, beta: 1.1 },
+  PYPL: { name: "PayPal Holdings",          price: 72,   volatility: 0.032, bias: 0.002,  category: "momentum", sector: "Payments",      marketCapBillions: 78,   floatMillions: 1080,   shortInterestBase: 2.8,  institutionalOwnership: 78, beta: 1.6 },
+
+  // ──────────────────────────────────────────────────────
   // CRYPTO — 24/7, max volatility, money printer fuel
   // ──────────────────────────────────────────────────────
   BTC:   { name: "Bitcoin",           price: 83200, volatility: 0.040, bias: 0.006, category: "crypto", sector: "Crypto", marketCapBillions: 1640, floatMillions: 19500, shortInterestBase: 0.8, institutionalOwnership: 55, beta: 1.8, marketType: "crypto", exchange: "Binance", tradingHours: "24/7", pipSize: 1 },
