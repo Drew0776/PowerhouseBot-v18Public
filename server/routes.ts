@@ -1,6 +1,7 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage, getStockData, getStockByTicker } from "./storage";
+import { requireAuth, passport } from "./auth";
 import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow, generateMarketStatus } from "./seed";
 import {
   createGridBot,
@@ -67,8 +68,37 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
+  // ── Auth routes (public) ──────────────────────────────────────────────────
+
+  // GET /api/auth/check — returns whether the current session is authenticated
+  app.get("/api/auth/check", (req, res) => {
+    res.json({ authenticated: req.isAuthenticated() });
+  });
+
+  // POST /api/auth/login — { password }
+  app.post("/api/auth/login", (req: Request, res: Response, next: NextFunction) => {
+    passport.authenticate("local", (err: unknown, user: Express.User | false) => {
+      if (err) return next(err);
+      if (!user) return res.status(401).json({ message: "Invalid password" });
+      req.logIn(user, (loginErr) => {
+        if (loginErr) return next(loginErr);
+        res.json({ authenticated: true });
+      });
+    })(req, res, next);
+  });
+
+  // POST /api/auth/logout
+  app.post("/api/auth/logout", (req: Request, res: Response, next: NextFunction) => {
+    req.logout((err) => {
+      if (err) return next(err);
+      res.json({ authenticated: false });
+    });
+  });
+
+  // ── Protected routes ──────────────────────────────────────────────────────
+
   // GET /api/portfolio — current portfolio value, P&L, positions
-  app.get("/api/portfolio", (_req, res) => {
+  app.get("/api/portfolio", requireAuth, (_req, res) => {
     try {
       const portfolio = storage.getPortfolio();
       res.json(portfolio);
@@ -240,7 +270,7 @@ export async function registerRoutes(
   });
 
   // GET /api/settings
-  app.get("/api/settings", (_req, res) => {
+  app.get("/api/settings", requireAuth, (_req, res) => {
     try {
       const s = storage.getSettings();
       res.json(s);
@@ -250,7 +280,7 @@ export async function registerRoutes(
   });
 
   // GET /api/alpaca/status — connection health + cached ticker count
-  app.get("/api/alpaca/status", async (_req, res) => {
+  app.get("/api/alpaca/status", requireAuth, async (_req, res) => {
     try {
       const status = getAlpacaStatus();
       const account = await getAlpacaAccount();
@@ -261,7 +291,7 @@ export async function registerRoutes(
   });
 
   // POST /api/alpaca/refresh — force immediate price refresh
-  app.post("/api/alpaca/refresh", async (_req, res) => {
+  app.post("/api/alpaca/refresh", requireAuth, async (_req, res) => {
     try {
       startAlpacaFeed();
       await refreshAllPrices();
@@ -273,7 +303,7 @@ export async function registerRoutes(
   });
 
   // GET /api/telegram/test — test Telegram connection
-  app.get("/api/telegram/test", async (_req, res) => {
+  app.get("/api/telegram/test", requireAuth, async (_req, res) => {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chatId) {
@@ -284,7 +314,7 @@ export async function registerRoutes(
   });
 
   // POST /api/settings
-  app.post("/api/settings", (req, res) => {
+  app.post("/api/settings", requireAuth, (req, res) => {
     try {
       const s = storage.saveSettings(req.body);
       res.json(s);
@@ -294,7 +324,7 @@ export async function registerRoutes(
   });
 
   // GET /api/trades — trade log
-  app.get("/api/trades", (_req, res) => {
+  app.get("/api/trades", requireAuth, (_req, res) => {
     try {
       const allTrades = storage.getTrades();
       const closedTrades = allTrades.filter((t) => t.status === "closed");
@@ -338,7 +368,7 @@ export async function registerRoutes(
     takeProfit: z.number().positive().optional(),
   });
 
-  app.post("/api/trades", (req, res) => {
+  app.post("/api/trades", requireAuth, (req, res) => {
     try {
       // Reject sell explicitly with a clear message before generic validation.
       if (req.body && req.body.action && req.body.action !== "buy") {
@@ -391,7 +421,7 @@ export async function registerRoutes(
   });
 
   // POST /api/trades/:id/close — close a position
-  app.post("/api/trades/:id/close", (req, res) => {
+  app.post("/api/trades/:id/close", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) {
@@ -421,7 +451,7 @@ export async function registerRoutes(
   });
 
   // GET /api/equity-curve — portfolio value time series
-  app.get("/api/equity-curve", (_req, res) => {
+  app.get("/api/equity-curve", requireAuth, (_req, res) => {
     try {
       const curve = storage.getEquityCurve();
       res.json(curve);
@@ -433,7 +463,7 @@ export async function registerRoutes(
   // ─── Auto-Trader API ─────────────────────────────────────────────────────
 
   // GET /api/auto-trader — full state
-  app.get("/api/auto-trader", (_req, res) => {
+  app.get("/api/auto-trader", requireAuth, (_req, res) => {
     try {
       res.json(getAutoTraderState());
     } catch (err) {
@@ -442,7 +472,7 @@ export async function registerRoutes(
   });
 
   // POST /api/auto-trader/start — start the engine
-  app.post("/api/auto-trader/start", (_req, res) => {
+  app.post("/api/auto-trader/start", requireAuth, (_req, res) => {
     try {
       startAutoTrader();
       res.json({ status: "started" });
@@ -452,7 +482,7 @@ export async function registerRoutes(
   });
 
   // POST /api/auto-trader/stop — stop the engine
-  app.post("/api/auto-trader/stop", (_req, res) => {
+  app.post("/api/auto-trader/stop", requireAuth, (_req, res) => {
     try {
       stopAutoTrader();
       res.json({ status: "stopped" });
@@ -462,7 +492,7 @@ export async function registerRoutes(
   });
 
   // POST /api/auto-trader/tick — advance one tick
-  app.post("/api/auto-trader/tick", (_req, res) => {
+  app.post("/api/auto-trader/tick", requireAuth, (_req, res) => {
     try {
       if (!isAutoTraderRunning()) {
         return res.status(400).json({ message: "Auto-trader is not running. Start it first." });
@@ -475,7 +505,7 @@ export async function registerRoutes(
   });
 
   // GET /api/auto-trader/scan — scan without trading (preview)
-  app.get("/api/auto-trader/scan", (_req, res) => {
+  app.get("/api/auto-trader/scan", requireAuth, (_req, res) => {
     try {
       const signals = scanForBreakouts();
       res.json(signals);
@@ -485,7 +515,7 @@ export async function registerRoutes(
   });
 
   // POST /api/auto-trader/backtest — V6 walk-forward backtest
-  app.post("/api/auto-trader/backtest", (req, res) => {
+  app.post("/api/auto-trader/backtest", requireAuth, (req, res) => {
     try {
       const ticks = typeof req.body?.ticks === "number" ? Math.min(req.body.ticks, 5000) : 1000;
       const result = runWalkForwardBacktest(ticks);
@@ -496,7 +526,7 @@ export async function registerRoutes(
   });
 
   // POST /api/portfolio/reset — reset trades and equity curve for fresh start
-  app.post("/api/portfolio/reset", async (_req, res) => {
+  app.post("/api/portfolio/reset", requireAuth, async (_req, res) => {
     try {
       // Delete all trades and equity curve entries
       const { db } = await import("./storage");
@@ -516,7 +546,7 @@ export async function registerRoutes(
   // ─── Grid Bot API ────────────────────────────────────────────────────────
 
   // GET /api/grid/bots — list all grid bots
-  app.get("/api/grid/bots", (_req, res) => {
+  app.get("/api/grid/bots", requireAuth, (_req, res) => {
     try {
       const bots = getAllGridBots();
       res.json(bots);
@@ -526,7 +556,7 @@ export async function registerRoutes(
   });
 
   // GET /api/grid/bots/:id — full summary for one bot
-  app.get("/api/grid/bots/:id", (req, res) => {
+  app.get("/api/grid/bots/:id", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
@@ -548,7 +578,7 @@ export async function registerRoutes(
     stopBufferPct: z.number().min(0).max(0.5).optional(),
   });
 
-  app.post("/api/grid/bots", (req, res) => {
+  app.post("/api/grid/bots", requireAuth, (req, res) => {
     try {
       const parsed = createBotSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -602,7 +632,7 @@ export async function registerRoutes(
   });
 
   // POST /api/grid/bots/:id/tick — advance the simulation by one tick
-  app.post("/api/grid/bots/:id/tick", (req, res) => {
+  app.post("/api/grid/bots/:id/tick", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
@@ -615,7 +645,7 @@ export async function registerRoutes(
   });
 
   // POST /api/grid/bots/:id/stop — stop a bot
-  app.post("/api/grid/bots/:id/stop", (req, res) => {
+  app.post("/api/grid/bots/:id/stop", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
@@ -628,7 +658,7 @@ export async function registerRoutes(
   });
 
   // POST /api/grid/bots/:id/start — (re)start background ticking for a bot
-  app.post("/api/grid/bots/:id/start", (req, res) => {
+  app.post("/api/grid/bots/:id/start", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
@@ -645,7 +675,7 @@ export async function registerRoutes(
   });
 
   // POST /api/grid/bots/:id/toggle — pause/resume a bot
-  app.post("/api/grid/bots/:id/toggle", (req, res) => {
+  app.post("/api/grid/bots/:id/toggle", requireAuth, (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { status } = req.body as { status: "active" | "paused" };
@@ -667,7 +697,7 @@ export async function registerRoutes(
   // SECURITY: clamp `count` (and bound lower/upper) to the same safe range
   // used by createBotSchema so a malicious caller cannot force the server to
   // allocate a multi-million-element array (memory-exhaustion DoS).
-  app.get("/api/grid/preview", (req, res) => {
+  app.get("/api/grid/preview", requireAuth, (req, res) => {
     try {
       const lower = parseFloat(req.query.lower as string);
       const upper = parseFloat(req.query.upper as string);
@@ -694,7 +724,7 @@ export async function registerRoutes(
   });
 
   // GET /api/grid/auto-range — auto-calculate optimal range for a ticker
-  app.get("/api/grid/auto-range", (req, res) => {
+  app.get("/api/grid/auto-range", requireAuth, (req, res) => {
     try {
       const ticker = (req.query.ticker as string)?.toUpperCase();
       if (!ticker) return res.status(400).json({ message: "ticker required" });
