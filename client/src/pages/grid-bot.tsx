@@ -24,6 +24,7 @@ function pnlColor(n: number) {
 function statusBadge(status: string) {
   if (status === "active") return <Badge className="bg-[#00e676]/20 text-[#00e676] border-[#00e676]/30 text-[10px] px-1.5 py-0">LIVE</Badge>;
   if (status === "paused") return <Badge className="bg-yellow-400/20 text-yellow-400 border-yellow-400/30 text-[10px] px-1.5 py-0">PAUSED</Badge>;
+  if (status === "stopped_range_exit") return <Badge data-testid="badge-exited-range" className="bg-amber-500/20 text-amber-400 border-amber-500/40 text-[10px] px-1.5 py-0" title="Price exited the configured grid range — bot auto-closed all open positions">EXITED RANGE</Badge>;
   return <Badge className="bg-zinc-700 text-zinc-400 text-[10px] px-1.5 py-0">STOPPED</Badge>;
 }
 
@@ -152,6 +153,7 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
   const [upper, setUpper] = useState("");
   const [gridCount, setGridCount] = useState(10);
   const [investment, setInvestment] = useState(Math.min(25, availableCash).toString());
+  const [stopBufferPctStr, setStopBufferPctStr] = useState("5");
 
   // Auto-range API — smart range + grid count suggestion
   const { data: autoRangeData } = useQuery<any>({
@@ -177,7 +179,9 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
   const lowerNum = parseFloat(lower);
   const upperNum = parseFloat(upper);
   const investNum = parseFloat(investment);
-  const isValid = !isNaN(lowerNum) && !isNaN(upperNum) && lowerNum < upperNum && gridCount >= 2 && investNum > 0 && investNum <= availableCash;
+  const stopBufferPctNum = parseFloat(stopBufferPctStr);
+  const stopBufferValid = !isNaN(stopBufferPctNum) && stopBufferPctNum >= 0 && stopBufferPctNum <= 50;
+  const isValid = !isNaN(lowerNum) && !isNaN(upperNum) && lowerNum < upperNum && gridCount >= 2 && investNum > 0 && investNum <= availableCash && stopBufferValid;
 
   const gridStep = isValid ? (upperNum - lowerNum) / gridCount : 0;
   const profitPerGrid = isValid && (lowerNum + upperNum) > 0
@@ -206,6 +210,7 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
       upperPrice: upperNum,
       gridCount,
       totalInvestment: investNum,
+      stopBufferPct: stopBufferPctNum / 100,
     });
   }
 
@@ -291,6 +296,34 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
           <span>3 (wider gaps, bigger profit)</span>
           <span>30 (tight, high frequency)</span>
         </div>
+      </div>
+
+      {/* Range Stop Buffer */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <Label className="text-[11px] text-zinc-400 uppercase tracking-wider">Range Stop Buffer %</Label>
+          <span
+            className="text-[10px] text-zinc-500 font-mono cursor-help"
+            title="If price drops more than this % below the lower bound, or rises this % above the upper bound, the bot auto-closes all open positions at market and stops. Caps your downside when price permanently leaves the grid range. Default: 5%."
+          >
+            ⓘ what's this?
+          </span>
+        </div>
+        <Input
+          data-testid="input-stop-buffer"
+          value={stopBufferPctStr}
+          onChange={e => setStopBufferPctStr(e.target.value)}
+          type="number"
+          min={0}
+          max={50}
+          step={0.5}
+          className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm"
+        />
+        {stopBufferValid && !isNaN(lowerNum) && !isNaN(upperNum) && lowerNum < upperNum && (
+          <p className="text-[10px] text-zinc-500 font-mono">
+            Auto-stops if price &lt; ${fmt(lowerNum * (1 - stopBufferPctNum / 100))} or &gt; ${fmt(upperNum * (1 + stopBufferPctNum / 100))}
+          </p>
+        )}
       </div>
 
       {/* Live Preview */}
@@ -642,7 +675,7 @@ export default function GridBotPage() {
                       ⚡ Force Tick
                     </Button>
                   )}
-                  {summary.bot.status !== "stopped" && (
+                  {summary.bot.status !== "stopped" && summary.bot.status !== "stopped_range_exit" && (
                     <Button
                       data-testid="button-stop-bot"
                       onClick={() => stopMutation.mutate(summary.bot.id)}

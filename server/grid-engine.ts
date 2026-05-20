@@ -27,6 +27,7 @@ sqlite.exec(`
     grid_count INTEGER NOT NULL,
     total_investment REAL NOT NULL,
     profit_per_grid REAL NOT NULL,
+    stop_buffer_pct REAL NOT NULL DEFAULT 0.05,
     created_at TEXT NOT NULL,
     stopped_at TEXT,
     realized_pnl REAL NOT NULL DEFAULT 0,
@@ -47,6 +48,14 @@ sqlite.exec(`
     filled_at TEXT NOT NULL
   );
 `);
+
+// Migration: add stop_buffer_pct column to pre-existing grid_bots tables
+try {
+  const cols = sqlite.prepare(`PRAGMA table_info(grid_bots)`).all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === "stop_buffer_pct")) {
+    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN stop_buffer_pct REAL NOT NULL DEFAULT 0.05`);
+  }
+} catch (_e) { /* non-fatal */ }
 
 /** Build equally-spaced grid levels between lower and upper */
 export function buildGridLevels(lower: number, upper: number, count: number): number[] {
@@ -111,8 +120,9 @@ export function createGridBot(params: {
   upperPrice: number;
   gridCount: number;
   totalInvestment: number;
+  stopBufferPct?: number;
 }): GridBot {
-  const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment } = params;
+  const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct } = params;
   const profitPerGrid = calcProfitPerGrid(lowerPrice, upperPrice, gridCount);
 
   const bot = gridDb.insert(gridBots).values({
@@ -122,6 +132,7 @@ export function createGridBot(params: {
     gridCount,
     totalInvestment,
     profitPerGrid,
+    stopBufferPct: stopBufferPct ?? 0.05,
     createdAt: new Date().toISOString(),
   }).returning().get();
 
@@ -165,6 +176,54 @@ export function toggleGridBot(id: number, status: "active" | "paused"): GridBot 
 }
 
 /**
+ * Close all currently open (unmatched) buy positions at market for a bot.
+ * Used by the range-exit stop-loss to flatten exposure.
+ * Records a SELL grid_order per open buy at the supplied market price,
+ * with realized P&L = (marketPrice - buyPrice) * shares, and rolls the
+ * total into bot.realizedPnl.
+ */
+function closeAllOpenPositions(bot: GridBot, marketPrice: number): void {
+  const allOrders = getGridOrders(bot.id);
+  const openBuys = new Map<number, GridOrder>();
+  for (const o of [...allOrders].reverse()) {
+    if (o.action === "buy") {
+      if (!openBuys.has(o.level)) openBuys.set(o.level, o);
+    } else if (o.action === "sell") {
+      openBuys.delete(o.level - 1);
+    }
+  }
+  if (openBuys.size === 0) return;
+
+  let pnlDelta = 0;
+  let fillsDelta = 0;
+  const nowIso = new Date().toISOString();
+  for (const buy of Array.from(openBuys.values())) {
+    const pnl = Math.round((marketPrice - buy.gridPrice) * buy.shares * 100) / 100;
+    const total = Math.round(buy.shares * marketPrice * 100) / 100;
+    gridDb.insert(gridOrders).values({
+      botId: bot.id,
+      ticker: bot.ticker,
+      level: buy.level + 1, // synthetic "exit" sell tagged one level up
+      gridPrice: marketPrice,
+      action: "sell",
+      fillPrice: marketPrice,
+      shares: buy.shares,
+      total,
+      pnl,
+      filledAt: nowIso,
+    }).run();
+    pnlDelta += pnl;
+    fillsDelta += 1;
+  }
+
+  const newPnl = Math.round((bot.realizedPnl + pnlDelta) * 100) / 100;
+  gridDb.update(gridBots).set({
+    realizedPnl: newPnl,
+    totalGridFills: bot.totalGridFills + fillsDelta,
+  }).where(eq(gridBots.id, bot.id)).run();
+}
+
+/**
  * Run one "tick" of the grid engine for a given bot.
  * 
  * Logic:
@@ -186,7 +245,22 @@ export function tickGridBot(botId: number): GridOrder | null {
   if (!currentPrice) return null;
   const levels = buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
 
-  // If price is outside the grid range, skip tick
+  // Range-exit stop-loss: if price has strayed beyond [lower*(1-buf), upper*(1+buf)],
+  // close all open positions at market and stop the bot.
+  const buf = bot.stopBufferPct ?? 0.05;
+  const stopLower = bot.lowerPrice * (1 - buf);
+  const stopUpper = bot.upperPrice * (1 + buf);
+  if (currentPrice < stopLower || currentPrice > stopUpper) {
+    closeAllOpenPositions(bot, currentPrice);
+    stopGridBotLoop(botId);
+    gridDb.update(gridBots)
+      .set({ status: "stopped_range_exit", stoppedAt: new Date().toISOString() })
+      .where(eq(gridBots.id, botId))
+      .run();
+    return null;
+  }
+
+  // If price is outside the grid range (but within stop buffer), skip tick
   if (currentPrice < bot.lowerPrice || currentPrice > bot.upperPrice) {
     return null;
   }
