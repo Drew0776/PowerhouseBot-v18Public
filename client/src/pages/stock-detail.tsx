@@ -40,7 +40,8 @@ export default function StockDetail() {
   const [showBB, setShowBB] = useState(false);
 
   const { data: stock, isLoading } = useQuery<StockData>({
-    queryKey: ["/api/signals", ticker],
+    queryKey: [`/api/signals/${ticker}`],
+    enabled: !!ticker,
   });
 
   if (isLoading) {
