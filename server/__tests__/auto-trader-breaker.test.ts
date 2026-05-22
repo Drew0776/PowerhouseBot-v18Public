@@ -200,6 +200,147 @@ test("autoTraderTick enters no new positions while breaker is active", () => {
   assert.equal(isCircuitBreakerActive(), true, "breaker must remain active when portfolio has not recovered");
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Task #63 — Boundary-precision tests
+//
+// The tier-1/2/3 tests above use drawdowns safely above each limit. The cases
+// below pin the EXACT thresholds in server/auto-trader.ts:checkCircuitBreaker
+// (~line 1093–1106), so a strict `>` ↔ `>=` flip in either the drawdown
+// comparison or the tier selector would now fail loudly instead of slipping
+// through. Each assertion cites the line of intent it locks down.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Exact-drawdown thresholds (`dd >= limit`) ────────────────────────────────
+// Pins line 1100: `} else if (dd >= limit && !state.circuitBreakerActive) {`
+test("dd === 0.03 (exactly the tier-1 limit) trips because the comparison is >=", () => {
+  // dailyStart=1000, portfolio=970 → dd = 30/1000 = 0.03 exactly.
+  // totalValue=970 ≥ 500 selects the 3% tier (line 1096).
+  seedDailyStart(1000);
+  storage.getPortfolio = () => fakePortfolio(970);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "dd === 0.03 must trip the tier-1 3% limit (>=, not >). If this fails, line 1100 was flipped to `>`.",
+  );
+});
+
+test("dd === 0.05 (exactly the tier-2 limit) trips because the comparison is >=", () => {
+  // dailyStart=400, portfolio=380 → dd = 20/400 = 0.05 exactly.
+  // totalValue=380 is in [200, 500) → 5% tier (line 1096).
+  seedDailyStart(400);
+  storage.getPortfolio = () => fakePortfolio(380);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "dd === 0.05 must trip the tier-2 5% limit. If this fails, line 1100 was flipped to `>`.",
+  );
+});
+
+test("dd === 0.08 (exactly the tier-3 DAILY_DD_LIMIT) trips because the comparison is >=", () => {
+  // dailyStart=100, portfolio=92 → dd = 8/100 = 0.08 exactly.
+  // totalValue=92 < 200 → DAILY_DD_LIMIT (0.08) tier (line 1096).
+  // 92 > 50 keeps us out of the hard-floor branch at line 1097.
+  seedDailyStart(100);
+  storage.getPortfolio = () => fakePortfolio(92);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "dd === 0.08 must trip the tier-3 8% (DAILY_DD_LIMIT) limit. If this fails, line 1100 was flipped to `>`.",
+  );
+});
+
+// ── Tier-selector boundaries (`>= 500`, `>= 200`, `<= 50`) ───────────────────
+// Pins line 1096: `const limit = p.totalValue >= 500 ? 0.03 : p.totalValue >= 200 ? 0.05 : DAILY_DD_LIMIT;`
+// and line 1097: `if (p.totalValue <= 50 && !state.circuitBreakerActive) { ... }`
+//
+// Each cutoff pair (boundary value vs. boundary minus one cent) is driven at a
+// drawdown that lives strictly between two adjacent tier limits, so the only
+// way the assertion flips is if the SELECTOR itself moves.
+
+test("totalValue === $500 selects tier 1 (3% limit), $499 selects tier 2 (5% limit)", () => {
+  // Drawdown ≈ 4% — above tier-1's 3% limit, below tier-2's 5% limit.
+  // dailyStart chosen so $500 = 96% of it (4% dd at the boundary).
+  const dailyStart = 500 / (1 - 0.04); // 520.8333…
+  seedDailyStart(dailyStart);
+
+  // At exactly $500 → tier 1 (limit 3%), 4% dd trips.
+  storage.getPortfolio = () => fakePortfolio(500);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "$500 must select tier 1 (>=500 in line 1096); 4% dd ≥ 3% trips. If this fails, `>= 500` was flipped to `> 500`.",
+  );
+
+  // Re-arm and re-check at $499 (one cent below) → tier 2 (limit 5%), same dd does NOT trip.
+  storage.getPortfolio = () => fakePortfolio(dailyStart); // recover so breaker resets
+  evaluateCircuitBreaker();
+  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+
+  storage.getPortfolio = () => fakePortfolio(499);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    false,
+    "$499 must select tier 2 (5% limit); ~4% dd is below 5% and must NOT trip.",
+  );
+});
+
+test("totalValue === $200 selects tier 2 (5% limit), $199 selects tier 3 (8% limit)", () => {
+  // Drawdown ≈ 6% — above tier-2's 5% limit, below tier-3's 8% limit.
+  const dailyStart = 200 / (1 - 0.06); // 212.7659…
+  seedDailyStart(dailyStart);
+
+  // At exactly $200 → tier 2 (limit 5%), 6% dd trips.
+  storage.getPortfolio = () => fakePortfolio(200);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "$200 must select tier 2 (>=200 in line 1096); 6% dd ≥ 5% trips. If this fails, `>= 200` was flipped to `> 200`.",
+  );
+
+  storage.getPortfolio = () => fakePortfolio(dailyStart);
+  evaluateCircuitBreaker();
+  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+
+  storage.getPortfolio = () => fakePortfolio(199);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    false,
+    "$199 must select tier 3 (8% limit); ~6.5% dd is below 8% and must NOT trip.",
+  );
+});
+
+test("totalValue === $50 hits the hard floor, $51 does not", () => {
+  // Hard-floor branch fires regardless of dd, so use a baseline where dd is
+  // small enough that the dd-comparison branch alone would not trip. Then a
+  // shift from $51 → $50 isolates the `<= 50` check itself.
+  seedDailyStart(52);
+
+  // $51 → above the hard floor; dd = 1/52 ≈ 1.92%, below tier-3's 8% limit.
+  storage.getPortfolio = () => fakePortfolio(51);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    false,
+    "$51 is above the $50 hard floor and ~1.9% dd is below the tier-3 8% limit; must NOT trip.",
+  );
+
+  // $50 → exactly the hard floor (<= 50 in line 1097); must trip.
+  storage.getPortfolio = () => fakePortfolio(50);
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "$50 must hit the hard floor (<=50 in line 1097). If this fails, `<= 50` was flipped to `< 50`.",
+  );
+});
+
 // ── ET-midnight dateKey rollover re-baselines dailyStart ─────────────────────
 test("ET-midnight rollover re-baselines dailyStart so the new day starts at 0% dd", () => {
   // Day N: trip the breaker.
