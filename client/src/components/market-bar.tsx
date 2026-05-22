@@ -1,7 +1,7 @@
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import type { MarketStatus } from "@shared/schema";
 import { TrendingUp, TrendingDown, Minus, Clock } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * MarketBar — top-of-page status strip.
@@ -81,16 +81,22 @@ function applyMarket(
 }
 
 export default function MarketBar() {
-  // First, ensure the query is registered and running. We only care whether
-  // the query has *ever* delivered data so we know when to flip from the
-  // null placeholder to the live shell — react-query is told NOT to
-  // re-render this component on subsequent data changes.
-  const { data: initialMarket } = useQuery<MarketStatus>({
+  const queryClient = useQueryClient();
+
+  // Register the query so it polls, but disable ALL change-driven re-renders
+  // by passing `notifyOnChangeProps: []`. The component will never re-render
+  // when market-status data updates — we update the DOM imperatively.
+  useQuery<MarketStatus>({
     queryKey: ["/api/market-status"],
-    notifyOnChangeProps: ["data"], // re-render only when data first arrives
+    notifyOnChangeProps: [],
   });
 
-  const queryClient = useQueryClient();
+  // We need exactly ONE render after the first snapshot arrives so the
+  // static shell appears. The cache subscriber below flips `ready` to true
+  // when (or if) data is already present at mount.
+  const [ready, setReady] = useState(
+    () => !!queryClient.getQueryData<MarketStatus>(["/api/market-status"]),
+  );
 
   // Refs to every live text node in the bar.
   const sentimentIconRef = useRef<HTMLSpanElement>(null);
@@ -108,8 +114,6 @@ export default function MarketBar() {
 
   // Subscribe to query cache imperatively — no React renders triggered.
   useEffect(() => {
-    if (!initialMarket) return;
-
     const refs = {
       sentimentIcon: sentimentIconRef.current,
       sentimentLabel: sentimentLabelRef.current,
@@ -139,20 +143,24 @@ export default function MarketBar() {
       swapIcon(m.sentiment);
     };
 
-    // Initial paint from the first snapshot.
-    apply(initialMarket);
+    // Paint from whatever snapshot is already in cache.
+    const current = queryClient.getQueryData<MarketStatus>(["/api/market-status"]);
+    if (current) apply(current);
 
-    // Then listen for every cache update without forcing a render.
+    // Subscribe to every subsequent cache update — without forcing a render.
     const unsub = queryClient.getQueryCache().subscribe((event) => {
       if (event.type !== "updated") return;
       const key = event.query.queryKey;
       if (!Array.isArray(key) || key[0] !== "/api/market-status") return;
       const next = event.query.state.data as MarketStatus | undefined;
-      if (next) apply(next);
+      if (!next) return;
+      // Flip ready once so the shell mounts (then we never re-render again).
+      setReady((r) => (r ? r : true));
+      apply(next);
     });
 
     return unsub;
-  }, [initialMarket, queryClient]);
+  }, [queryClient, ready]);
 
   // Imperative once-per-second clock — also bypasses React renders.
   useEffect(() => {
@@ -177,7 +185,7 @@ export default function MarketBar() {
     return () => clearInterval(interval);
   }, []);
 
-  if (!initialMarket) return null;
+  if (!ready) return null;
 
   // Static shell — rendered ONCE, then never reconciled by data changes.
   // All live numbers/colors are populated by the cache subscriber above.
