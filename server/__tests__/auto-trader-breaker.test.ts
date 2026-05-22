@@ -252,67 +252,122 @@ test("dd === 0.08 (exactly the tier-3 DAILY_DD_LIMIT) trips because the comparis
   );
 });
 
-// ── Tier-selector boundaries (`>= 500`, `>= 200`, `<= 50`) ───────────────────
-// Pins line 1096: `const limit = p.totalValue >= 500 ? 0.03 : p.totalValue >= 200 ? 0.05 : DAILY_DD_LIMIT;`
-// and line 1097: `if (p.totalValue <= 50 && !state.circuitBreakerActive) { ... }`
-//
-// Each cutoff pair (boundary value vs. boundary minus one cent) is driven at a
-// drawdown that lives strictly between two adjacent tier limits, so the only
-// way the assertion flips is if the SELECTOR itself moves.
+// ── Tier-selector boundaries (`tierAnchor >= 500`, `tierAnchor >= 200`, `<= 50`) ─
+// Task #64 changed tier selection to anchor on dailyStart.value, not on the
+// per-tick portfolio value (server/auto-trader.ts:checkCircuitBreaker line
+// 1106). The cutoff tests therefore drive the BOUNDARY through dailyStart,
+// not through the current portfolio. The hard-floor branch still uses
+// p.totalValue (it's a real-dollar liquidation safety net, line 1107).
 
-test("totalValue === $500 selects tier 1 (3% limit), $499 selects tier 2 (5% limit)", () => {
-  // Drawdown ≈ 4% — above tier-1's 3% limit, below tier-2's 5% limit.
-  // dailyStart chosen so $500 = 96% of it (4% dd at the boundary).
-  const dailyStart = 500 / (1 - 0.04); // 520.8333…
-  seedDailyStart(dailyStart);
+test("dailyStart === $500 selects tier 1 (3% limit), $499 selects tier 2 (5% limit)", () => {
+  // Drawdown ≈ 4% — above tier-1's 3% limit, below tier-2's 5% limit. The
+  // only way the assertions flip is if the tier SELECTOR moves.
 
-  // At exactly $500 → tier 1 (limit 3%), 4% dd trips.
-  storage.getPortfolio = () => fakePortfolio(500);
+  // Anchor at exactly $500 → tier 1 (limit 3%); 4% dd trips.
+  seedDailyStart(500);
+  storage.getPortfolio = () => fakePortfolio(500 * 0.96); // dd = 0.04 exactly
   evaluateCircuitBreaker();
   assert.equal(
     isCircuitBreakerActive(),
     true,
-    "$500 must select tier 1 (>=500 in line 1096); 4% dd ≥ 3% trips. If this fails, `>= 500` was flipped to `> 500`.",
+    "dailyStart $500 must select tier 1 (>=500 in line 1106); 4% dd ≥ 3% trips. If this fails, `>= 500` was flipped to `> 500`.",
   );
 
-  // Re-arm and re-check at $499 (one cent below) → tier 2 (limit 5%), same dd does NOT trip.
-  storage.getPortfolio = () => fakePortfolio(dailyStart); // recover so breaker resets
-  evaluateCircuitBreaker();
-  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
-
-  storage.getPortfolio = () => fakePortfolio(499);
+  // Anchor at $499 (one cent below) → tier 2 (limit 5%); same dd does NOT trip.
+  seedDailyStart(499);
+  storage.getPortfolio = () => fakePortfolio(499 * 0.96); // dd = 0.04 exactly
   evaluateCircuitBreaker();
   assert.equal(
     isCircuitBreakerActive(),
     false,
-    "$499 must select tier 2 (5% limit); ~4% dd is below 5% and must NOT trip.",
+    "dailyStart $499 must select tier 2 (5% limit); 4% dd is below 5% and must NOT trip.",
   );
 });
 
-test("totalValue === $200 selects tier 2 (5% limit), $199 selects tier 3 (8% limit)", () => {
+test("dailyStart === $200 selects tier 2 (5% limit), $199 selects tier 3 (8% limit)", () => {
   // Drawdown ≈ 6% — above tier-2's 5% limit, below tier-3's 8% limit.
-  const dailyStart = 200 / (1 - 0.06); // 212.7659…
-  seedDailyStart(dailyStart);
 
-  // At exactly $200 → tier 2 (limit 5%), 6% dd trips.
-  storage.getPortfolio = () => fakePortfolio(200);
+  seedDailyStart(200);
+  storage.getPortfolio = () => fakePortfolio(200 * 0.94); // dd = 0.06 exactly
   evaluateCircuitBreaker();
   assert.equal(
     isCircuitBreakerActive(),
     true,
-    "$200 must select tier 2 (>=200 in line 1096); 6% dd ≥ 5% trips. If this fails, `>= 200` was flipped to `> 200`.",
+    "dailyStart $200 must select tier 2 (>=200 in line 1106); 6% dd ≥ 5% trips. If this fails, `>= 200` was flipped to `> 200`.",
   );
 
-  storage.getPortfolio = () => fakePortfolio(dailyStart);
-  evaluateCircuitBreaker();
-  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
-
-  storage.getPortfolio = () => fakePortfolio(199);
+  seedDailyStart(199);
+  storage.getPortfolio = () => fakePortfolio(199 * 0.94); // dd = 0.06 exactly
   evaluateCircuitBreaker();
   assert.equal(
     isCircuitBreakerActive(),
     false,
-    "$199 must select tier 3 (8% limit); ~6.5% dd is below 8% and must NOT trip.",
+    "dailyStart $199 must select tier 3 (8% limit); 6% dd is below 8% and must NOT trip.",
+  );
+});
+
+// ── Task #64 — Tier no longer flips when the portfolio jitters across $500/$200 ─
+// Before #64, the tier was picked from the CURRENT portfolio every tick, so a
+// portfolio bouncing 501 ↔ 499 silently toggled between the 3% and 5% limits
+// tick-to-tick. After #64, the tier is anchored to dailyStart.value, so the
+// limit is stable for the whole session.
+
+test("$500 boundary: portfolio oscillating across $500 keeps the same tier and trips identically", () => {
+  // Anchor above $500 so the session is locked to tier 1 (3% limit). Drive
+  // drawdowns at ~3.65% (portfolio $501) and ~4.04% (portfolio $499). Both
+  // are above tier 1's 3% limit, so BOTH must trip. Under the old per-tick
+  // selector, only $501 would have tripped — $499 would have switched to
+  // tier 2 (5% limit) and slipped past at 4.04% dd.
+  seedDailyStart(520);
+
+  storage.getPortfolio = () => fakePortfolio(501); // dd ≈ 3.65%
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "portfolio $501 must trip at the tier-1 3% limit anchored by dailyStart $520",
+  );
+
+  // Recover so the breaker resets, then probe at $499.
+  storage.getPortfolio = () => fakePortfolio(520);
+  evaluateCircuitBreaker();
+  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+
+  storage.getPortfolio = () => fakePortfolio(499); // dd ≈ 4.04%
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "portfolio $499 must ALSO trip — tier stays anchored to dailyStart, not the jittery current value. Under the pre-#64 selector this would have silently flipped to tier 2 (5% limit) and not tripped.",
+  );
+});
+
+test("$200 boundary: portfolio oscillating across $200 keeps the same tier and trips identically", () => {
+  // Anchor above $200 so the session is locked to tier 2 (5% limit). Drive
+  // drawdowns at ~5.24% (portfolio $200) and ~5.71% (portfolio $199). Both
+  // are above tier 2's 5% limit, so BOTH must trip. Under the old per-tick
+  // selector, $199 would have switched to tier 3 (8% limit) and slipped
+  // past at 5.71% dd.
+  seedDailyStart(211);
+
+  storage.getPortfolio = () => fakePortfolio(200); // dd ≈ 5.21%
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "portfolio $200 must trip at the tier-2 5% limit anchored by dailyStart $211",
+  );
+
+  storage.getPortfolio = () => fakePortfolio(211);
+  evaluateCircuitBreaker();
+  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+
+  storage.getPortfolio = () => fakePortfolio(199); // dd ≈ 5.69%
+  evaluateCircuitBreaker();
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "portfolio $199 must ALSO trip — tier stays anchored to dailyStart. Under the pre-#64 selector this would have silently flipped to tier 3 (8% limit) and not tripped.",
   );
 });
 

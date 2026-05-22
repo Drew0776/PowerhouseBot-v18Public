@@ -1093,7 +1093,14 @@ function managePositions() {
 function checkCircuitBreaker() {
   const p = storage.getPortfolio();
   const dd = (dailyStart.value - p.totalValue) / Math.max(dailyStart.value, 1);
-  const limit = p.totalValue >= 500 ? 0.03 : p.totalValue >= 200 ? 0.05 : DAILY_DD_LIMIT;
+  // Task #64: anchor the tier selector to the day's STARTING value, not the
+  // jittery current portfolio. Otherwise a portfolio bouncing across $500 or
+  // $200 silently swaps between the 3/5/8 % limits tick-to-tick, leaving a
+  // trader who lost (say) 4 % from a $520 start protected one tick and
+  // unprotected the next. The hard-floor branch below still uses p.totalValue
+  // because it's a real-dollar liquidation safety net, not a tier label.
+  const tierAnchor = dailyStart.value;
+  const limit = tierAnchor >= 500 ? 0.03 : tierAnchor >= 200 ? 0.05 : DAILY_DD_LIMIT;
   if (p.totalValue <= 50 && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`🚨 HARD FLOOR $50 | Emergency stop`);
@@ -1460,8 +1467,23 @@ export function startAutoTrader() {
   }
 
   const p = storage.getPortfolio();
-  dailyStart.value = p.totalValue;
-  dailyStart.tick  = state.totalTicks;
+  // Task #64: preserve the day's anchor across same-day restarts. If
+  // restoreState() loaded a dailyStart already taken today (ET), keep it —
+  // otherwise the breaker tier would silently re-baseline (e.g. a trader
+  // already 4% down would lose their tier-1 protection after a process
+  // restart). Re-baseline only on first-ever start or after the ET day
+  // rolls over.
+  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const todayKey = `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
+  const sameDayAnchorRestored = dailyStart.tick > 0 && dailyStart.dateKey === todayKey;
+  if (sameDayAnchorRestored) {
+    log(`🔒 Daily anchor restored: $${dailyStart.value.toFixed(2)} (same ET day — breaker tier preserved)`);
+  } else {
+    dailyStart.value = p.totalValue;
+    dailyStart.tick  = state.totalTicks;
+    dailyStart.dateKey = todayKey;
+    log(`🌅 Daily anchor initialized: $${p.totalValue.toFixed(2)}`);
+  }
   sessionStartValue = p.totalValue;
   sessionPeak = p.totalValue;
 
