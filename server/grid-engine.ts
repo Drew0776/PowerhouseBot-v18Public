@@ -15,6 +15,7 @@ import { gridBots, gridOrders } from "@shared/schema";
 import type { GridBot, GridOrder, GridBotSummary, GridLevel } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
 import { getStockByTicker, advancePrice, getLivePrice, db as gridDb, sqlite } from "./storage";
+import { evaluateCircuitBreaker } from "./auto-trader";
 
 // Create tables if they don't exist (uses shared connection)
 sqlite.exec(`
@@ -49,18 +50,78 @@ sqlite.exec(`
   );
 `);
 
-// Migration: add stop_buffer_pct column to pre-existing grid_bots tables
+// Migration: add stop_buffer_pct + Task #50 ATR-spacing columns to pre-existing
+// grid_bots tables. Each ALTER is conditional so this is idempotent.
 try {
   const cols = sqlite.prepare(`PRAGMA table_info(grid_bots)`).all() as Array<{ name: string }>;
-  if (!cols.some(c => c.name === "stop_buffer_pct")) {
-    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN stop_buffer_pct REAL NOT NULL DEFAULT 0.05`);
-  }
+  const has = (n: string) => cols.some(c => c.name === n);
+  if (!has("stop_buffer_pct")) sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN stop_buffer_pct REAL NOT NULL DEFAULT 0.05`);
+  if (!has("spacing_mode"))    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN spacing_mode TEXT NOT NULL DEFAULT 'fixed'`);
+  if (!has("atr_window"))      sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN atr_window INTEGER NOT NULL DEFAULT 14`);
+  if (!has("atr_multiplier"))  sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN atr_multiplier REAL NOT NULL DEFAULT 1.0`);
+  if (!has("step_min_pct"))    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN step_min_pct REAL NOT NULL DEFAULT 0.005`);
+  if (!has("step_max_pct"))    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN step_max_pct REAL NOT NULL DEFAULT 0.05`);
 } catch (_e) { /* non-fatal */ }
 
 /** Build equally-spaced grid levels between lower and upper */
 export function buildGridLevels(lower: number, upper: number, count: number): number[] {
   const step = (upper - lower) / count;
   return Array.from({ length: count + 1 }, (_, i) => Math.round((lower + i * step) * 100) / 100);
+}
+
+// ── Task #50: ATR-based spacing ──────────────────────────────────────────────
+// ATR is snapshotted at bot-creation time from the ticker's daily candle
+// history. The derived gridCount is then persisted so level indices stay
+// stable for the bot's lifetime — that preserves the open-buy / sell-level
+// matching invariants in tickGridBot() and avoids re-keying open positions
+// when volatility shifts intra-bot. (Bots are still range-exit-protected by
+// stopBufferPct, so a volatility blow-out gracefully flattens & exits.)
+
+/** Compute ATR (in dollars) from a ticker's daily candle history. */
+export function computeAtrFromHistory(ticker: string, window: number): number {
+  const stock = getStockByTicker(ticker);
+  if (!stock || !stock.history || stock.history.length < 2) return 0;
+  const candles = stock.history.slice(-Math.max(2, window + 1));
+  let sumTR = 0;
+  let n = 0;
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i];
+    const prevClose = candles[i - 1].close;
+    const tr = Math.max(
+      c.high - c.low,
+      Math.abs(c.high - prevClose),
+      Math.abs(c.low - prevClose),
+    );
+    if (Number.isFinite(tr) && tr > 0) { sumTR += tr; n++; }
+  }
+  return n > 0 ? sumTR / n : 0;
+}
+
+/**
+ * Derive a stable step size for an ATR-spaced grid, clamped to the user's
+ * min/max step (expressed as % of reference price).
+ */
+function deriveAtrStep(params: {
+  ticker: string;
+  referencePrice: number;
+  atrWindow: number;
+  atrMultiplier: number;
+  stepMinPct: number;
+  stepMaxPct: number;
+}): { step: number; atr: number } {
+  const { ticker, referencePrice, atrWindow, atrMultiplier, stepMinPct, stepMaxPct } = params;
+  const atr = computeAtrFromHistory(ticker, atrWindow);
+  const minStep = referencePrice * stepMinPct;
+  const maxStep = referencePrice * stepMaxPct;
+  let raw = atr * atrMultiplier;
+  if (!Number.isFinite(raw) || raw <= 0) raw = minStep; // no history yet → take floor
+  const step = Math.min(maxStep, Math.max(minStep, raw));
+  return { step, atr };
+}
+
+/** Build the level array a bot should use (honors its persisted spacingMode). */
+export function computeBotLevels(bot: GridBot): number[] {
+  return buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
 }
 
 /** Calculate profit per grid step as percentage */
@@ -121,8 +182,44 @@ export function createGridBot(params: {
   gridCount: number;
   totalInvestment: number;
   stopBufferPct?: number;
+  spacingMode?: "fixed" | "atr";
+  atrWindow?: number;
+  atrMultiplier?: number;
+  stepMinPct?: number;
+  stepMaxPct?: number;
 }): GridBot {
-  const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct } = params;
+  const {
+    ticker, lowerPrice, upperPrice, totalInvestment, stopBufferPct,
+    spacingMode = "fixed",
+    atrWindow = 14,
+    atrMultiplier = 1.0,
+    stepMinPct = 0.005,
+    stepMaxPct = 0.05,
+  } = params;
+
+  // Determine effective gridCount. For ATR mode we snapshot the step from the
+  // ticker's current realized volatility and derive a stable gridCount so the
+  // bot's level indices stay aligned with its open positions on every tick.
+  let gridCount = params.gridCount;
+  if (spacingMode === "atr") {
+    const stock = getStockByTicker(ticker.toUpperCase());
+    const referencePrice = stock?.price && stock.price > 0
+      ? stock.price
+      : (lowerPrice + upperPrice) / 2;
+    const { step } = deriveAtrStep({
+      ticker: ticker.toUpperCase(),
+      referencePrice,
+      atrWindow,
+      atrMultiplier,
+      stepMinPct,
+      stepMaxPct,
+    });
+    const derived = Math.floor((upperPrice - lowerPrice) / step);
+    // Cap to the user's requested gridCount (treat it as a max) and a hard
+    // upper bound to keep the grid renderable.
+    gridCount = Math.max(2, Math.min(params.gridCount, derived, 100));
+  }
+
   const profitPerGrid = calcProfitPerGrid(lowerPrice, upperPrice, gridCount);
 
   const bot = gridDb.insert(gridBots).values({
@@ -133,6 +230,11 @@ export function createGridBot(params: {
     totalInvestment,
     profitPerGrid,
     stopBufferPct: stopBufferPct ?? 0.05,
+    spacingMode,
+    atrWindow,
+    atrMultiplier,
+    stepMinPct,
+    stepMaxPct,
     createdAt: new Date().toISOString(),
   }).returning().get();
 
@@ -158,9 +260,22 @@ export function getGridOrders(botId: number): GridOrder[] {
     .all();
 }
 
+/**
+ * Cancel any outstanding grid-engine work for a bot.
+ *
+ * The simulator records fills synchronously inside tickGridBot(), so there
+ * are no async "working" orders to cancel; stopping the background tick
+ * loop is sufficient. This function exists as a single named hook so the
+ * future real-broker integration (e.g. resting Alpaca limit orders) can
+ * cancel its working orders here without having to find every kill path.
+ */
+export function cancelOpenGridOrders(botId: number): void {
+  stopGridBotLoop(botId);
+}
+
 /** Stop a grid bot */
 export function stopGridBot(id: number): GridBot | undefined {
-  stopGridBotLoop(id);
+  cancelOpenGridOrders(id);
   return gridDb.update(gridBots)
     .set({ status: "stopped", stoppedAt: new Date().toISOString() })
     .where(eq(gridBots.id, id))
@@ -240,10 +355,28 @@ export function tickGridBot(botId: number): GridOrder | null {
   const bot = getGridBot(botId);
   if (!bot || bot.status !== "active") return null;
 
+  // Task #50 — Global drawdown circuit breaker. We call the portfolio-driven
+  // evaluator so the kill switch is truly global: it trips even when the
+  // auto-trader tick loop is stopped (grid-only deployments still get the
+  // hard-drawdown protection). On trip, every grid bot is flattened at
+  // market and parked in `paused_by_breaker`; the boot-time watcher (see
+  // bootGridEngine) auto-resumes these bots once drawdown recovers.
+  if (evaluateCircuitBreaker()) {
+    const livePrice = getLivePrice(bot.ticker);
+    const marketPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
+    closeAllOpenPositions(bot, marketPrice);
+    cancelOpenGridOrders(botId);
+    gridDb.update(gridBots)
+      .set({ status: "paused_by_breaker" })
+      .where(eq(gridBots.id, botId))
+      .run();
+    return null;
+  }
+
   // Advance price simulation — GBM + mean-reversion step
   const currentPrice = advancePrice(bot.ticker);
   if (!currentPrice) return null;
-  const levels = buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
+  const levels = computeBotLevels(bot);
 
   // Range-exit stop-loss: if price has strayed beyond [lower*(1-buf), upper*(1+buf)],
   // close all open positions at market and stop the bot.
@@ -363,7 +496,7 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
   const livePrice = getLivePrice(bot.ticker);
   const currentPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
 
-  const levels = buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
+  const levels = computeBotLevels(bot);
   const allOrders = getGridOrders(botId);
 
   // Compute per-level fill info
@@ -430,4 +563,44 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
 export function simulateGridTick(botId: number, priceOverride?: number): GridOrder | null {
   // For paper trading we just run the real tick (prices come from seed data)
   return tickGridBot(botId);
+}
+
+// ── Task #50: Boot + circuit-breaker watcher ────────────────────────────────
+let _breakerWatcher: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Resume any bots that were parked by the circuit breaker now that drawdown
+ * has recovered. Runs every 5s as a side-channel because tickGridBot() is
+ * what trips the breaker-pause, and once it does its own loop is stopped —
+ * so nothing in-bot can observe the breaker resetting.
+ */
+function watchBreakerResume(): void {
+  // Re-evaluate from the live portfolio before deciding to resume so the
+  // breaker's reset condition (portfolio recovered above drawdown limit)
+  // is observed independent of the auto-trader loop.
+  if (evaluateCircuitBreaker()) return;
+  const parked = gridDb.select().from(gridBots)
+    .where(eq(gridBots.status, "paused_by_breaker")).all();
+  for (const bot of parked) {
+    gridDb.update(gridBots).set({ status: "active" }).where(eq(gridBots.id, bot.id)).run();
+    startGridBotLoop(bot.id);
+  }
+}
+
+/**
+ * One-shot startup wiring for the grid engine.
+ *  - Resumes background tick loops for any bot that was active at shutdown
+ *    (verifies the task-50 "restart-survival" criterion — all bot/order
+ *     state lives in SQLite and is replayed on demand by tickGridBot()).
+ *  - Starts the global breaker-resume watcher.
+ */
+export function bootGridEngine(): void {
+  for (const bot of getAllGridBots()) {
+    if (bot.status === "active") startGridBotLoop(bot.id);
+  }
+  if (!_breakerWatcher) {
+    _breakerWatcher = setInterval(() => {
+      try { watchBreakerResume(); } catch (_e) { /* non-fatal */ }
+    }, 5000);
+  }
 }

@@ -269,13 +269,21 @@ export interface UserSettings {
 export const gridBots = sqliteTable("grid_bots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   ticker: text("ticker").notNull(),
-  status: text("status").notNull().default("active"), // "active" | "paused" | "stopped" | "stopped_range_exit"
+  status: text("status").notNull().default("active"), // "active" | "paused" | "paused_by_breaker" | "stopped" | "stopped_range_exit"
   lowerPrice: real("lower_price").notNull(),
   upperPrice: real("upper_price").notNull(),
   gridCount: integer("grid_count").notNull(),
   totalInvestment: real("total_investment").notNull(),
   profitPerGrid: real("profit_per_grid").notNull(), // theoretical % profit per grid step
   stopBufferPct: real("stop_buffer_pct").notNull().default(0.05), // range-exit stop buffer (e.g. 0.05 = 5%)
+  // Task #50 — ATR-based spacing (snapshot at creation; gridCount is derived
+  // when spacingMode === "atr" and remains stable for the bot's lifetime so
+  // level indices stay aligned with open positions on subsequent ticks).
+  spacingMode: text("spacing_mode").notNull().default("fixed"), // "fixed" | "atr"
+  atrWindow: integer("atr_window").notNull().default(14),
+  atrMultiplier: real("atr_multiplier").notNull().default(1.0),
+  stepMinPct: real("step_min_pct").notNull().default(0.005), // clamp: min step as % of price
+  stepMaxPct: real("step_max_pct").notNull().default(0.05),  // clamp: max step as % of price
   createdAt: text("created_at").notNull(),
   stoppedAt: text("stopped_at"),
   realizedPnl: real("realized_pnl").notNull().default(0),
