@@ -34,6 +34,29 @@ for (const ext of ["", "-wal", "-shm"]) {
 }
 process.env.DATA_DB_PATH = TEST_DB;
 
+// Task #65: ensure startAutoTrader()'s call to startAlpacaFeed() is a no-op
+// (the feed early-returns when these creds are absent), so the test never
+// touches the network or opens a WebSocket.
+delete process.env.ALPACA_KEY_ID;
+delete process.env.ALPACA_SECRET_KEY;
+
+// Task #65: server/auto-trader.ts uses a bare `require("./storage")` inside
+// persistState() / restoreState() for sync access to the shared sqlite
+// handle. Under tsx-ESM (how this test file runs), `require` is not in
+// scope and the call throws ReferenceError, which is swallowed by the
+// surrounding try/catch — meaning restoreState() silently does nothing and
+// the Task #64 same-day-anchor branch can never be reached from a test.
+// Install a real CJS require so restoreState() actually loads our seeded
+// engine_state row. Production runs via the bundled build where `require`
+// is defined; this only patches the dev/test runtime.
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+// Anchor the polyfilled require at server/auto-trader.ts so its
+// `require("./storage")` resolves to server/storage.ts (not relative to
+// this test file, which would yield server/__tests__/storage and ENOENT).
+const _autoTraderPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "auto-trader.ts");
+(globalThis as any).require = createRequire(_autoTraderPath);
+
 const storageMod    = await import("../storage.js");
 const autoTraderMod = await import("../auto-trader.js");
 
@@ -45,6 +68,8 @@ const {
   resetAutoTraderState,
   autoTraderTick,
   getAutoTraderState,
+  startAutoTrader,
+  stopAutoTrader,
 } = autoTraderMod;
 
 const ORIG_getPortfolio = storage.getPortfolio.bind(storage);
@@ -504,5 +529,184 @@ test("ET-midnight rollover re-baselines dailyStart so the new day starts at 0% d
     );
   } finally {
     Date.prototype.toLocaleString = origToLocale;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task #65 — Prove the daily-loss limit survives a server restart on the same
+// ET day. Task #64 made startAutoTrader() preserve the day's anchor across
+// same-day restarts (server/auto-trader.ts ~line 1470–1486), but no automated
+// test drove the full restart path end-to-end. These two variants do:
+//
+//   1. Same-day restart: persist a dailyStart for today's ET dateKey, call
+//      startAutoTrader(), and prove the anchor is unchanged (so a trader
+//      already 4% down from a $520 start doesn't silently lose tier-1
+//      protection on a process restart).
+//   2. New-day restart: roll the ET dateKey forward by one day across the
+//      startAutoTrader() call and prove the anchor IS re-baselined to the
+//      current portfolio (so a fresh trading day starts at 0% dd).
+//
+// Both variants stub Alpaca-feed creds away (top-of-file) so startAlpacaFeed()
+// early-returns without network, and call stopAutoTrader() in finally{} to
+// clear the 2 s tick + 5 min equity-snapshot intervals.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Build today's ET dateKey in the exact format the breaker uses. */
+function todayETKey(): string {
+  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
+}
+
+/**
+ * Write a persisted engine_state row that restoreState() will load on the
+ * next startAutoTrader() call. Mirrors the payload shape in
+ * server/auto-trader.ts:persistState() so all the `?? 0` fallbacks in
+ * restoreState() get satisfied and dailyStart.tick > 0 (the precondition
+ * for `sameDayAnchorRestored` at line 1478).
+ */
+function seedPersistedDailyStart(value: number, dateKey: string, totalTicks = 5) {
+  const payload = {
+    isRunning: false,
+    totalTicks,
+    totalTrades: 0,
+    closedTrades: 0,
+    winRate: 0,
+    totalPnl: 0,
+    dailyPnl: 0,
+    totalSlippageCost: 0,
+    roiPct: 0,
+    wins: 0, losses: 0, totalWinAmt: 0, totalLossAmt: 0,
+    pnlHistory: [],
+    dailyStartValue: value,
+    dailyStartTick: totalTicks,
+    dailyStartDateKey: dateKey,
+    openPositions: [],
+  };
+  sqlite
+    .prepare(`INSERT OR REPLACE INTO engine_state (id, state_json, updated_at) VALUES (1, ?, ?)`)
+    .run(JSON.stringify(payload), new Date().toISOString());
+}
+
+test("Task #65 — same-day restart: startAutoTrader preserves dailyStart anchor; tier-1 breaker still trips at the original limit", () => {
+  // Persist a $520 anchor for TODAY (ET). This simulates a trader who
+  // started the day at $520 and is now restarting the server while still
+  // mid-session — they must keep tier 1 (3% limit) because dailyStart $520
+  // ≥ 500. resetAutoTraderState() in beforeEach cleared engine_state, so
+  // seeding here is a clean write.
+  const todayKey = todayETKey();
+  seedPersistedDailyStart(520, todayKey);
+
+  // Portfolio at restart is $499 — a 4.04% drawdown vs the $520 anchor.
+  // This is ABOVE tier 1's 3% limit (anchor ≥ $500 → tier 1) but BELOW
+  // tier 2's 5% limit. If startAutoTrader() silently re-baselined the
+  // anchor to $499, the new dd would be 0% AND the new tier would be
+  // tier 2 (anchor < $500), and the breaker would not trip — the
+  // exact regression Task #64 fixed.
+  storage.getPortfolio = () => fakePortfolio(499);
+
+  startAutoTrader();
+  try {
+    // Sanity: restoreState() must have run end-to-end. If `require("./storage")`
+    // ever silently fails again (e.g. the top-of-file polyfill is removed),
+    // state.totalTicks would stay at 0 and the breaker assertion below would
+    // pass for the wrong reason (dailyStart left at the default $100 baseline).
+    assert.ok(
+      getAutoTraderState().totalTicks > 0,
+      "restoreState() must have loaded the persisted row (totalTicks > 0); otherwise the same-day-anchor branch was never reached and this test proves nothing",
+    );
+    // Behavioural proof that dailyStart.value is unchanged: evaluate the
+    // breaker under the same $499 portfolio and require it to trip. This
+    // can only happen if the anchor is still $520 AND the tier is still
+    // tier 1 (3% limit). A re-baseline would silently disarm both.
+    evaluateCircuitBreaker();
+    assert.equal(
+      isCircuitBreakerActive(),
+      true,
+      "same-day restart: $499 portfolio must trip tier-1 3% limit because dailyStart stays at $520. If this fails, startAutoTrader() silently re-baselined the anchor and tier-1 protection was lost across the restart.",
+    );
+  } finally {
+    stopAutoTrader();
+  }
+});
+
+test("Task #65 — new-day restart: startAutoTrader DOES re-baseline dailyStart when ET dateKey has rolled forward", () => {
+  // Persist a $520 anchor for TODAY, then patch Date so the ET-zoned call
+  // inside startAutoTrader (line 1476) returns TOMORROW. restoreState()
+  // still loads dateKey=today, but the comparison `dailyStart.dateKey ===
+  // todayKey` is now false → re-baseline branch (line 1482) must fire.
+  const todayKey = todayETKey();
+  seedPersistedDailyStart(520, todayKey);
+
+  storage.getPortfolio = () => fakePortfolio(499);
+
+  const origToLocale = Date.prototype.toLocaleString;
+  Date.prototype.toLocaleString = function patched(this: Date, ...args: any[]) {
+    const out = origToLocale.apply(this, args as any);
+    if (typeof out !== "string") return out;
+    // Only shift the ET-zoned breaker call. Inner Date(out).toLocaleString("en-US")
+    // (no options object) is left untouched so the parsed shifted date is
+    // formatted normally.
+    const looksLikeBreakerCall =
+      args[0] === "en-US" &&
+      args[1] &&
+      typeof args[1] === "object" &&
+      (args[1] as Intl.DateTimeFormatOptions).timeZone === "America/New_York";
+    if (!looksLikeBreakerCall) return out;
+    const d = new Date(out);
+    d.setDate(d.getDate() + 1);
+    return d.toLocaleString("en-US");
+  } as typeof Date.prototype.toLocaleString;
+
+  try {
+    startAutoTrader();
+    assert.ok(
+      getAutoTraderState().totalTicks > 0,
+      "restoreState() must have loaded the persisted row (totalTicks > 0); otherwise the re-baseline branch was never reached",
+    );
+
+    // Re-baselined: dailyStart.value should now equal the current $499
+    // portfolio, so today starts at 0% dd and the breaker must NOT trip.
+    evaluateCircuitBreaker();
+    assert.equal(
+      isCircuitBreakerActive(),
+      false,
+      "new-day restart: dd must be 0% because dailyStart was re-baselined to today's opening $499 portfolio",
+    );
+
+    // Prove the baseline actually moved to $499 (not still $520). With
+    // anchor $499 we are in tier 2 (anchor < $500 → 5% limit). A $469
+    // portfolio is a 6.01% drawdown and MUST trip tier 2. Under the old
+    // (non-rolled) $520 anchor, $469 would be a 9.8% dd in tier 1
+    // (3% limit) and would also trip — so to disambiguate we ALSO check
+    // a tier-2-only case below.
+    storage.getPortfolio = () => fakePortfolio(469);
+    evaluateCircuitBreaker();
+    assert.equal(
+      isCircuitBreakerActive(),
+      true,
+      "after re-baseline to $499, a 6% drawdown ($469) must trip tier-2's 5% limit",
+    );
+
+    // Tier-2-only disambiguation: reset and probe $474 (5.01% dd vs $499
+    // anchor → trips tier-2 5%). Under the OLD $520 anchor this would be
+    // 8.85% dd in tier 1 (3% limit) and would also trip — so we instead
+    // use $475 (4.81% dd vs $499 anchor) which must NOT trip tier 2's
+    // 5% limit. Under the OLD $520 anchor $475 would be 8.65% dd in
+    // tier 1 (3% limit) and WOULD trip. So a non-trip here uniquely
+    // proves the new $499 anchor is in effect.
+    storage.getPortfolio = () => fakePortfolio(499);
+    evaluateCircuitBreaker();
+    assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset after recovery to $499");
+
+    storage.getPortfolio = () => fakePortfolio(475);
+    evaluateCircuitBreaker();
+    assert.equal(
+      isCircuitBreakerActive(),
+      false,
+      "$475 is 4.81% dd vs the new $499 anchor (below tier-2 5%) and must NOT trip. Under the pre-restart $520 anchor, $475 would be 8.65% dd in tier 1 (3% limit) and WOULD trip — so a non-trip here proves the anchor was re-baselined.",
+    );
+  } finally {
+    Date.prototype.toLocaleString = origToLocale;
+    stopAutoTrader();
   }
 });
