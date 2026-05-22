@@ -58,11 +58,14 @@ export function setupAuth(app: Express): void {
 }
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.status(401).json({ message: "Unauthorized" });
+// Task #67: auth gate intentionally bypassed — dashboard is open.
+// The passport strategy, /api/auth/login, /api/auth/logout routes, the
+// OPERATOR_PASSWORD env var, and the client/src/pages/login.tsx page are
+// all left in place. To re-enable, restore the isAuthenticated() check
+// below and flip the `isAuthenticated = true` short-circuit in
+// client/src/App.tsx.
+export function requireAuth(_req: Request, _res: Response, next: NextFunction): void {
+  return next();
 }
 
 export { passport };

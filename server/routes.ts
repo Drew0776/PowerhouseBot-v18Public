@@ -71,9 +71,10 @@ export async function registerRoutes(
 
   // ── Auth routes (public) ──────────────────────────────────────────────────
 
-  // GET /api/auth/check — returns whether the current session is authenticated
-  app.get("/api/auth/check", (req, res) => {
-    res.json({ authenticated: req.isAuthenticated() });
+  // GET /api/auth/check — Task #67: auth bypassed, always authenticated.
+  // (Login/logout routes below remain functional but unused by the UI.)
+  app.get("/api/auth/check", (_req, res) => {
+    res.json({ authenticated: true });
   });
 
   // POST /api/auth/login — { password }
