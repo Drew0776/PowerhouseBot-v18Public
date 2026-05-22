@@ -1595,12 +1595,18 @@ export function stopAutoTrader() {
   log("⏹ V19 STOPPED");
 }
 
-export function resetCircuitBreaker() {
+export function resetCircuitBreaker(opts?: { manual?: boolean }) {
   state.circuitBreakerActive = false;
   const p = storage.getPortfolio();
   dailyStart.value = p.totalValue;
   dailyStart.tick  = state.totalTicks;
-  log("🔄 Circuit breaker reset");
+  // Task #68: re-anchor the ET dateKey so the very next evaluateCircuitBreaker()
+  // call doesn't fall into the "uninitialised" branch and re-baseline yet again.
+  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  dailyStart.dateKey = `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
+  log(opts?.manual
+    ? "🔁 Daily-loss breaker manually reset by operator"
+    : "🔄 Circuit breaker reset");
 }
 
 export function getAutoTraderState(): AutoTraderState {

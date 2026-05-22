@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import type { PortfolioSummary, GridBot } from "@shared/schema";
 import KpiCards from "@/components/kpi-cards";
 import EquityChart from "@/components/equity-chart";
@@ -7,7 +7,7 @@ import SignalBanner from "@/components/signal-banner";
 import MarketBar from "@/components/market-bar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Activity, Wallet, TrendingUp, Grid3x3 } from "lucide-react";
 
 function pnlColor(n: number) {
@@ -227,6 +227,26 @@ export default function Dashboard() {
     refetchInterval: 5000,
   });
 
+  // Task #68: manual daily-loss breaker reset. The mutation is gated on the
+  // server (409 when !circuitBreakerActive), so the button is also hidden
+  // client-side when circuitBreakerActive is false to avoid the round-trip.
+  const breakerActive: boolean = autoState?.circuitBreakerActive ?? false;
+  const resetBreaker = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("POST", "/api/auto-trader/breaker/reset");
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/auto-trader"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/grid/bots"] });
+    },
+  });
+  const onResetBreakerClick = () => {
+    if (!breakerActive) return;
+    if (!window.confirm("This will clear today's daily-loss breaker and re-anchor today's starting value to the current portfolio. Continue?")) return;
+    resetBreaker.mutate();
+  };
+
   const stats = autoState?.stats ?? {};
   const totalPnl = autoState?.totalPnl ?? 0;
   const winRate = autoState?.winRate ?? 0;
@@ -273,8 +293,34 @@ export default function Dashboard() {
                     <span className="text-sm font-semibold text-white tracking-wide">BOT PERFORMANCE</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{regime.toUpperCase()}</span>
                   </div>
-                  <span className="text-[11px] text-zinc-500 font-mono">{totalTrades} trades · {openPositions.length} open</span>
+                  <div className="flex items-center gap-3">
+                    {breakerActive && (
+                      <button
+                        type="button"
+                        onClick={onResetBreakerClick}
+                        disabled={resetBreaker.isPending}
+                        data-testid="button-reset-breaker"
+                        title="Clear the daily-loss circuit breaker and re-anchor today's start"
+                        className="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded border border-[#ff1744]/40 bg-[#ff1744]/10 text-[#ff8a80] hover:bg-[#ff1744]/20 disabled:opacity-50"
+                      >
+                        {resetBreaker.isPending ? "resetting…" : "🔁 Reset Breaker"}
+                      </button>
+                    )}
+                    <span className="text-[11px] text-zinc-500 font-mono">{totalTrades} trades · {openPositions.length} open</span>
+                  </div>
                 </div>
+
+                {breakerActive && (
+                  <div className="rounded-lg border border-[#ff1744]/40 bg-[#ff1744]/10 px-3 py-2 text-[11px] text-[#ff8a80] font-mono">
+                    Daily-loss circuit breaker is ACTIVE — no new entries until reset or recovery.
+                    {resetBreaker.error ? ` · Reset failed: ${(resetBreaker.error as Error).message}` : ""}
+                  </div>
+                )}
+                {!breakerActive && resetBreaker.isSuccess && (
+                  <div className="rounded-lg border border-[#00e676]/30 bg-[#00e676]/10 px-3 py-2 text-[11px] text-[#00e676] font-mono">
+                    Breaker cleared. Auto-trader will enter on the next qualifying signal.
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
                   <StatCard
