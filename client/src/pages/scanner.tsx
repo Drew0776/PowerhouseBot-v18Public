@@ -1,15 +1,26 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { ScannerTable, SignalBadge, PctCell, ScoreBar } from "@/components/scanner-table";
 import { Link } from "wouter";
 import type { PennyStockRow, MomentumRow, SqueezeRow, OptionsFlowRow } from "@shared/schema";
+import { useThrottledValue } from "@/hooks/use-throttled-value";
 
 // Safe toFixed helper — never crashes on undefined/null
 function sf(n: number | undefined | null, d = 2) {
   if (n == null || isNaN(n as number)) return "—";
   return (n as number).toFixed(d);
 }
+
+/**
+ * ThrottledPrice — leaf cell that throttles its visible value to at most
+ * one render every 300ms, regardless of how fast the underlying feed ticks.
+ * Memoized so unchanged neighbour rows never reconcile when one row updates.
+ */
+const ThrottledPrice = memo(function ThrottledPrice({ value }: { value: number | undefined | null }) {
+  const throttled = useThrottledValue(value, 300);
+  return <span className="font-mono tabular-nums">${sf(throttled)}</span>;
+});
 
 interface AlpacaStatus {
   connected: boolean;
@@ -98,7 +109,7 @@ function PennyTab({ stale }: { stale: boolean }) {
   const columns = [
     { key: "rank",     label: "#",        render: (r: PennyStockRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                        sortValue: (r: PennyStockRow) => r.rank,                 mobilePriority: 0 },
     { key: "ticker",   label: "Ticker",   render: (r: PennyStockRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                           sortValue: (r: PennyStockRow) => r.ticker,               mobilePriority: 1 },
-    { key: "price",    label: "Price",    render: (r: PennyStockRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                                sortValue: (r: PennyStockRow) => r.price ?? 0,           mobilePriority: 2 },
+    { key: "price",    label: "Price",    render: (r: PennyStockRow) => <ThrottledPrice value={r.price} />,                                                sortValue: (r: PennyStockRow) => r.price ?? 0,           mobilePriority: 2 },
     { key: "day",      label: "Day %",    render: (r: PennyStockRow) => <PctCell value={r.dayChangePercent} />,                                                                        sortValue: (r: PennyStockRow) => r.dayChangePercent ?? 0, mobilePriority: 3 },
     { key: "week",     label: "Wk %",     render: (r: PennyStockRow) => <PctCell value={r.weekChangePercent} />,                                                                       sortValue: (r: PennyStockRow) => r.weekChangePercent ?? 0, mobilePriority: 5 },
     { key: "month",    label: "Mo %",     render: (r: PennyStockRow) => <PctCell value={r.monthChangePercent} />,                                                                      sortValue: (r: PennyStockRow) => r.monthChangePercent ?? 0 },
@@ -120,7 +131,7 @@ function MomentumTab({ stale }: { stale: boolean }) {
   const columns = [
     { key: "rank",   label: "#",       render: (r: MomentumRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                   sortValue: (r: MomentumRow) => r.rank,                  mobilePriority: 0 },
     { key: "ticker", label: "Ticker",  render: (r: MomentumRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                      sortValue: (r: MomentumRow) => r.ticker,                mobilePriority: 1 },
-    { key: "price",  label: "Price",   render: (r: MomentumRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                            sortValue: (r: MomentumRow) => r.price ?? 0,            mobilePriority: 2 },
+    { key: "price",  label: "Price",   render: (r: MomentumRow) => <ThrottledPrice value={r.price} />,                                            sortValue: (r: MomentumRow) => r.price ?? 0,            mobilePriority: 2 },
     { key: "day",    label: "Day %",   render: (r: MomentumRow) => <PctCell value={r.dayChangePercent} />,                                                                    sortValue: (r: MomentumRow) => r.dayChangePercent ?? 0, mobilePriority: 3 },
     { key: "rsi",    label: "RSI",     render: (r: MomentumRow) => <span className="font-mono tabular-nums" style={{ color: (r.rsi ?? 50) > 70 ? "#ff1744" : (r.rsi ?? 50) < 30 ? "#00e676" : "#e0e0e0" }}>{sf(r.rsi, 0)}</span>, sortValue: (r: MomentumRow) => r.rsi ?? 50, mobilePriority: 4 },
     { key: "macd",   label: "MACD",    render: (r: MomentumRow) => { const v = r.macdSignal ?? 0; return <span className="font-mono text-[10px]" style={{ color: v > 0 ? "#00e676" : v < 0 ? "#ff1744" : "#ffd740" }}>{v > 0 ? "Bull" : v < 0 ? "Bear" : "Neu"}</span>; }, sortValue: (r: MomentumRow) => r.macdSignal ?? 0 },
@@ -142,7 +153,7 @@ function SqueezeTab({ stale }: { stale: boolean }) {
   const columns = [
     { key: "rank",   label: "#",        render: (r: SqueezeRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                     sortValue: (r: SqueezeRow) => r.rank,                  mobilePriority: 0 },
     { key: "ticker", label: "Ticker",   render: (r: SqueezeRow) => <TickerLink ticker={r.ticker} live={r.livePrice} stale={stale} />,                                                        sortValue: (r: SqueezeRow) => r.ticker,                mobilePriority: 1 },
-    { key: "price",  label: "Price",    render: (r: SqueezeRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                              sortValue: (r: SqueezeRow) => r.price ?? 0,            mobilePriority: 2 },
+    { key: "price",  label: "Price",    render: (r: SqueezeRow) => <ThrottledPrice value={r.price} />,                                              sortValue: (r: SqueezeRow) => r.price ?? 0,            mobilePriority: 2 },
     { key: "si",     label: "SI %",     render: (r: SqueezeRow) => <span className="font-mono tabular-nums font-bold" style={{ color: (r.shortInterestPct ?? 0) > 20 ? "#ff1744" : "#ffd740" }}>{sf(r.shortInterestPct)}%</span>, sortValue: (r: SqueezeRow) => r.shortInterestPct ?? 0, mobilePriority: 3 },
     { key: "dtc",    label: "DTC",      render: (r: SqueezeRow) => <span className="font-mono tabular-nums" style={{ color: (r.daysToCover ?? 0) > 5 ? "#ff1744" : "#ffd740" }}>{sf(r.daysToCover, 1)}d</span>, sortValue: (r: SqueezeRow) => r.daysToCover ?? 0, mobilePriority: 4 },
     { key: "ctb",    label: "CTB %",    render: (r: SqueezeRow) => <span className="font-mono tabular-nums text-[#ffd740]">{sf(r.costToBorrow, 1)}%</span>,                    sortValue: (r: SqueezeRow) => r.costToBorrow ?? 0 },
@@ -163,7 +174,7 @@ function OptionsTab() {
 
     { key: "rank",    label: "#",         render: (r: OptionsFlowRow) => <span className="text-zinc-500 font-mono text-[11px]">{r.rank}</span>,                                 sortValue: (r: OptionsFlowRow) => r.rank,                mobilePriority: 0 },
     { key: "ticker",  label: "Ticker",    render: (r: OptionsFlowRow) => <TickerLink ticker={r.ticker} />,                                                                       sortValue: (r: OptionsFlowRow) => r.ticker,              mobilePriority: 1 },
-    { key: "price",   label: "Price",     render: (r: OptionsFlowRow) => <span className="font-mono tabular-nums">${sf(r.price)}</span>,                                          sortValue: (r: OptionsFlowRow) => r.price ?? 0,          mobilePriority: 2 },
+    { key: "price",   label: "Price",     render: (r: OptionsFlowRow) => <ThrottledPrice value={r.price} />,                                          sortValue: (r: OptionsFlowRow) => r.price ?? 0,          mobilePriority: 2 },
     { key: "type",    label: "C/P",       render: (r: OptionsFlowRow) => <span className="font-mono font-bold text-[10px]" style={{ color: r.contractType === "Call" ? "#00e676" : "#ff1744" }}>{r.contractType === "Call" ? "CALL" : "PUT"}</span>, sortValue: (r: OptionsFlowRow) => r.contractType, mobilePriority: 3 },
     { key: "strike",  label: "Strike",    render: (r: OptionsFlowRow) => <span className="font-mono tabular-nums">${sf(r.strike)}</span>,                                         sortValue: (r: OptionsFlowRow) => r.strike ?? 0,         mobilePriority: 4 },
     { key: "expiry",  label: "Exp",       render: (r: OptionsFlowRow) => <span className="text-zinc-400 text-[10px] font-mono">{r.expiry ?? "—"}</span>,                          sortValue: (r: OptionsFlowRow) => r.expiry ?? "" },
