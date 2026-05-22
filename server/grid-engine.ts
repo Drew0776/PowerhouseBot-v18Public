@@ -119,9 +119,64 @@ function deriveAtrStep(params: {
   return { step, atr };
 }
 
-/** Build the level array a bot should use (honors its persisted spacingMode). */
+/**
+ * Returns true while a bot has any open (unmatched) buy orders. Used to freeze
+ * dynamic ATR re-spacing until the current cycle of buys has been paired off,
+ * so level indices stay stable and sell matching (`o.level - 1`) never breaks.
+ */
+function botHasOpenBuys(botId: number): boolean {
+  const orders = gridDb.select().from(gridOrders).where(eq(gridOrders.botId, botId)).all();
+  const openBuys = new Map<number, GridOrder>();
+  for (const o of orders) {
+    if (o.action === "buy") openBuys.set(o.level, o);
+    else if (o.action === "sell") openBuys.delete(o.level - 1);
+  }
+  return openBuys.size > 0;
+}
+
+/**
+ * Build the level array a bot should use (honors its persisted spacingMode).
+ *
+ * For `fixed` mode the grid is purely equal-spaced from the persisted
+ * gridCount. For `atr` mode the step is re-derived from the live rolling ATR
+ * every call and clamped to the user's [stepMinPct, stepMaxPct] band, so the
+ * grid breathes with realized volatility. We only resize the grid (and persist
+ * the new gridCount) when the bot has NO open buys — that preserves the
+ * trade-matching invariant that a sell at level N pairs with the open buy at
+ * level N-1. While there are open buys we keep the current gridCount so level
+ * indices remain stable across ticks.
+ */
 export function computeBotLevels(bot: GridBot): number[] {
-  return buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
+  if (bot.spacingMode !== "atr") {
+    return buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
+  }
+  const stock = getStockByTicker(bot.ticker);
+  const referencePrice = stock?.price && stock.price > 0
+    ? stock.price
+    : (bot.lowerPrice + bot.upperPrice) / 2;
+  const { step } = deriveAtrStep({
+    ticker: bot.ticker,
+    referencePrice,
+    atrWindow: bot.atrWindow,
+    atrMultiplier: bot.atrMultiplier,
+    stepMinPct: bot.stepMinPct,
+    stepMaxPct: bot.stepMaxPct,
+  });
+  const derived = Math.max(2, Math.min(100, Math.floor((bot.upperPrice - bot.lowerPrice) / step)));
+  // Freeze re-spacing while the current grid cycle has open buys so existing
+  // (level → price) bindings don't shift under fills that are mid-flight.
+  const effectiveCount = botHasOpenBuys(bot.id) ? bot.gridCount : derived;
+  if (effectiveCount !== bot.gridCount) {
+    // Persist so summary, profit-per-grid, and future ticks all agree.
+    try {
+      gridDb.update(gridBots)
+        .set({ gridCount: effectiveCount })
+        .where(eq(gridBots.id, bot.id))
+        .run();
+      bot.gridCount = effectiveCount;
+    } catch (_e) { /* non-fatal — fall through with derived count */ }
+  }
+  return buildGridLevels(bot.lowerPrice, bot.upperPrice, effectiveCount);
 }
 
 /** Calculate profit per grid step as percentage */
