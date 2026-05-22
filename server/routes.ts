@@ -18,6 +18,7 @@ import {
   autoRange,
   startGridBotLoop,
   stopGridBotLoop,
+  getGridEvents,
 } from "./grid-engine";
 import {
   autoTraderTick,
@@ -586,6 +587,9 @@ export async function registerRoutes(
     atrMultiplier: z.number().positive().max(20).optional(),
     stepMinPct: z.number().min(0.0005).max(0.5).optional(),
     stepMaxPct: z.number().min(0.001).max(1).optional(),
+    // Task #56 — opt-in adaptive regrid threshold (e.g. 0.30 = 30% ATR drift).
+    // 0 (default) = OFF — bot keeps existing behavior.
+    autoRegridDriftPct: z.number().min(0).max(5).optional(),
   });
 
   app.post("/api/grid/bots", requireAuth, (req, res) => {
@@ -597,7 +601,13 @@ export async function registerRoutes(
       const {
         ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
         spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
+        autoRegridDriftPct,
       } = parsed.data;
+      // Auto-regrid only makes sense in ATR mode; reject silently-ignored values
+      // so the operator can't think it's on when it isn't.
+      if (autoRegridDriftPct && autoRegridDriftPct > 0 && spacingMode !== "atr") {
+        return res.status(400).json({ message: "autoRegridDriftPct requires spacingMode='atr'" });
+      }
       if (stepMinPct !== undefined && stepMaxPct !== undefined && stepMinPct >= stepMaxPct) {
         return res.status(400).json({ message: "stepMinPct must be < stepMaxPct" });
       }
@@ -643,10 +653,23 @@ export async function registerRoutes(
       const bot = createGridBot({
         ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
         spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
+        autoRegridDriftPct,
       });
       res.json(bot);
     } catch (err) {
       res.status(500).json({ message: "Failed to create grid bot" });
+    }
+  });
+
+  // GET /api/grid/bots/:id/events — recent regrid audit log (Task #56)
+  app.get("/api/grid/bots/:id/events", requireAuth, (req, res) => {
+    try {
+      const id = parseInt(String(req.params.id));
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
+      const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50")) || 50));
+      res.json(getGridEvents(id, limit));
+    } catch (err) {
+      res.status(500).json({ message: "Failed to load bot events" });
     }
   });
 

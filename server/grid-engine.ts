@@ -11,8 +11,8 @@
  */
 
 import { eq, desc } from "drizzle-orm";
-import { gridBots, gridOrders } from "@shared/schema";
-import type { GridBot, GridOrder, GridBotSummary, GridLevel } from "@shared/schema";
+import { gridBots, gridOrders, gridEvents } from "@shared/schema";
+import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
 import { getStockByTicker, advancePrice, getLivePrice, db as gridDb, sqlite } from "./storage";
 import { evaluateCircuitBreaker } from "./auto-trader";
@@ -48,6 +48,21 @@ sqlite.exec(`
     pnl REAL,
     filled_at TEXT NOT NULL
   );
+
+  -- Task #56: audit log for adaptive regrid events
+  CREATE TABLE IF NOT EXISTS grid_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    old_step REAL NOT NULL,
+    new_step REAL NOT NULL,
+    old_atr REAL NOT NULL,
+    new_atr REAL NOT NULL,
+    old_grid_count INTEGER NOT NULL,
+    new_grid_count INTEGER NOT NULL,
+    flattened_positions INTEGER NOT NULL DEFAULT 0,
+    timestamp TEXT NOT NULL
+  );
 `);
 
 // Migration: add stop_buffer_pct + Task #50 ATR-spacing columns to pre-existing
@@ -61,6 +76,9 @@ try {
   if (!has("atr_multiplier"))  sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN atr_multiplier REAL NOT NULL DEFAULT 1.0`);
   if (!has("step_min_pct"))    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN step_min_pct REAL NOT NULL DEFAULT 0.005`);
   if (!has("step_max_pct"))    sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN step_max_pct REAL NOT NULL DEFAULT 0.05`);
+  // Task #56 — auto-regrid drift settings + ATR baseline snapshot
+  if (!has("auto_regrid_drift_pct")) sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN auto_regrid_drift_pct REAL NOT NULL DEFAULT 0`);
+  if (!has("atr_snapshot"))          sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN atr_snapshot REAL NOT NULL DEFAULT 0`);
 } catch (_e) { /* non-fatal */ }
 
 /** Build equally-spaced grid levels between lower and upper */
@@ -69,13 +87,13 @@ export function buildGridLevels(lower: number, upper: number, count: number): nu
   return Array.from({ length: count + 1 }, (_, i) => Math.round((lower + i * step) * 100) / 100);
 }
 
-// ── Task #50: ATR-based spacing ──────────────────────────────────────────────
-// ATR is snapshotted at bot-creation time from the ticker's daily candle
-// history. The derived gridCount is then persisted so level indices stay
-// stable for the bot's lifetime — that preserves the open-buy / sell-level
-// matching invariants in tickGridBot() and avoids re-keying open positions
-// when volatility shifts intra-bot. (Bots are still range-exit-protected by
-// stopBufferPct, so a volatility blow-out gracefully flattens & exits.)
+// ── Task #50/#56: ATR-based spacing ──────────────────────────────────────────
+// computeBotLevels() re-derives the ATR step from live history every call and
+// clamps it to [stepMinPct, stepMaxPct]. To preserve sell↔buy matching
+// (`level - 1`), gridCount is only resized when the bot has no open buys.
+// Task #56 adds an opt-in `autoRegridDriftPct` that flattens open positions
+// and rebuilds the grid whenever live ATR has drifted past the threshold
+// relative to `atrSnapshot` (the ATR captured at the last regrid).
 
 /** Compute ATR (in dollars) from a ticker's daily candle history. */
 export function computeAtrFromHistory(ticker: string, window: number): number {
@@ -168,12 +186,14 @@ export function computeBotLevels(bot: GridBot): number[] {
   const effectiveCount = botHasOpenBuys(bot.id) ? bot.gridCount : derived;
   if (effectiveCount !== bot.gridCount) {
     // Persist so summary, profit-per-grid, and future ticks all agree.
+    const newProfitPerGrid = calcProfitPerGrid(bot.lowerPrice, bot.upperPrice, effectiveCount);
     try {
       gridDb.update(gridBots)
-        .set({ gridCount: effectiveCount })
+        .set({ gridCount: effectiveCount, profitPerGrid: newProfitPerGrid })
         .where(eq(gridBots.id, bot.id))
         .run();
       bot.gridCount = effectiveCount;
+      bot.profitPerGrid = newProfitPerGrid;
     } catch (_e) { /* non-fatal — fall through with derived count */ }
   }
   return buildGridLevels(bot.lowerPrice, bot.upperPrice, effectiveCount);
@@ -242,6 +262,7 @@ export function createGridBot(params: {
   atrMultiplier?: number;
   stepMinPct?: number;
   stepMaxPct?: number;
+  autoRegridDriftPct?: number;
 }): GridBot {
   const {
     ticker, lowerPrice, upperPrice, totalInvestment, stopBufferPct,
@@ -250,18 +271,20 @@ export function createGridBot(params: {
     atrMultiplier = 1.0,
     stepMinPct = 0.005,
     stepMaxPct = 0.05,
+    autoRegridDriftPct = 0,
   } = params;
 
-  // Determine effective gridCount. For ATR mode we snapshot the step from the
-  // ticker's current realized volatility and derive a stable gridCount so the
-  // bot's level indices stay aligned with its open positions on every tick.
+  // Determine an initial gridCount. computeBotLevels() will re-derive the step
+  // from live ATR on every tick (clamped to [stepMinPct, stepMaxPct]); the
+  // value we persist here is just the starting count for the first cycle.
   let gridCount = params.gridCount;
+  let atrSnapshot = 0;
   if (spacingMode === "atr") {
     const stock = getStockByTicker(ticker.toUpperCase());
     const referencePrice = stock?.price && stock.price > 0
       ? stock.price
       : (lowerPrice + upperPrice) / 2;
-    const { step } = deriveAtrStep({
+    const { step, atr } = deriveAtrStep({
       ticker: ticker.toUpperCase(),
       referencePrice,
       atrWindow,
@@ -273,6 +296,9 @@ export function createGridBot(params: {
     // Cap to the user's requested gridCount (treat it as a max) and a hard
     // upper bound to keep the grid renderable.
     gridCount = Math.max(2, Math.min(params.gridCount, derived, 100));
+    // Capture the ATR baseline for #56 drift detection (0 if no history yet —
+    // maybeRegridFromDrift() will seed on first live evaluation).
+    atrSnapshot = Number.isFinite(atr) ? atr : 0;
   }
 
   const profitPerGrid = calcProfitPerGrid(lowerPrice, upperPrice, gridCount);
@@ -290,6 +316,8 @@ export function createGridBot(params: {
     atrMultiplier,
     stepMinPct,
     stepMaxPct,
+    autoRegridDriftPct,
+    atrSnapshot,
     createdAt: new Date().toISOString(),
   }).returning().get();
 
@@ -312,6 +340,107 @@ export function getGridOrders(botId: number): GridOrder[] {
   return gridDb.select().from(gridOrders)
     .where(eq(gridOrders.botId, botId))
     .orderBy(desc(gridOrders.id))
+    .all();
+}
+
+/**
+ * Task #56 — Adaptive regrid hook. When the bot has opted into auto-regrid
+ * (autoRegridDriftPct > 0) and is in ATR mode, this checks whether live ATR
+ * has drifted more than the configured fraction from `atrSnapshot`. If it has,
+ * the bot:
+ *   1) flattens every open buy at the supplied marketPrice (preserves P&L),
+ *   2) recomputes step / gridCount / profitPerGrid for the NEW volatility,
+ *   3) persists the new gridCount + profitPerGrid + atrSnapshot,
+ *   4) writes a `grid_events` audit row capturing old↔new step/ATR/count.
+ *
+ * The freeze guard in computeBotLevels() (no-resize while open buys exist) is
+ * deliberately bypassed here because we flatten first, so the level-matching
+ * invariant is trivially preserved on the next tick.
+ *
+ * Returns true if a regrid was applied.
+ */
+function maybeRegridFromDrift(bot: GridBot, marketPrice: number): boolean {
+  if (bot.spacingMode !== "atr") return false;
+  if (!bot.autoRegridDriftPct || bot.autoRegridDriftPct <= 0) return false;
+
+  const referencePrice = marketPrice > 0
+    ? marketPrice
+    : (bot.lowerPrice + bot.upperPrice) / 2;
+  const { step: newStep, atr: newAtr } = deriveAtrStep({
+    ticker: bot.ticker,
+    referencePrice,
+    atrWindow: bot.atrWindow,
+    atrMultiplier: bot.atrMultiplier,
+    stepMinPct: bot.stepMinPct,
+    stepMaxPct: bot.stepMaxPct,
+  });
+  if (!Number.isFinite(newAtr) || newAtr <= 0) return false; // no history yet
+
+  const baseline = bot.atrSnapshot;
+  if (!baseline || baseline <= 0) {
+    // Seed the baseline on first live observation so future ticks can measure
+    // drift against a real value; no flatten/regrid this tick.
+    gridDb.update(gridBots).set({ atrSnapshot: newAtr }).where(eq(gridBots.id, bot.id)).run();
+    bot.atrSnapshot = newAtr;
+    return false;
+  }
+  const drift = Math.abs(newAtr - baseline) / baseline;
+  if (drift < bot.autoRegridDriftPct) return false;
+
+  // Snapshot pre-regrid values for the audit row.
+  const oldGridCount = bot.gridCount;
+  const oldStep = (bot.upperPrice - bot.lowerPrice) / Math.max(1, oldGridCount);
+  const oldAtr = baseline;
+
+  // Count open buys we're about to flatten (for the audit row).
+  const flattenedPositions = (() => {
+    const orders = getGridOrders(bot.id);
+    const openBuys = new Map<number, GridOrder>();
+    for (const o of orders) {
+      if (o.action === "buy") openBuys.set(o.level, o);
+      else if (o.action === "sell") openBuys.delete(o.level - 1);
+    }
+    return openBuys.size;
+  })();
+  closeAllOpenPositions(bot, marketPrice);
+
+  const newGridCount = Math.max(
+    2,
+    Math.min(100, Math.floor((bot.upperPrice - bot.lowerPrice) / newStep)),
+  );
+  const newProfitPerGrid = calcProfitPerGrid(bot.lowerPrice, bot.upperPrice, newGridCount);
+
+  gridDb.update(gridBots).set({
+    gridCount: newGridCount,
+    profitPerGrid: newProfitPerGrid,
+    atrSnapshot: newAtr,
+  }).where(eq(gridBots.id, bot.id)).run();
+  bot.gridCount = newGridCount;
+  bot.profitPerGrid = newProfitPerGrid;
+  bot.atrSnapshot = newAtr;
+
+  gridDb.insert(gridEvents).values({
+    botId: bot.id,
+    kind: "regrid",
+    oldStep: Math.round(oldStep * 10000) / 10000,
+    newStep: Math.round(newStep * 10000) / 10000,
+    oldAtr: Math.round(oldAtr * 10000) / 10000,
+    newAtr: Math.round(newAtr * 10000) / 10000,
+    oldGridCount,
+    newGridCount,
+    flattenedPositions,
+    timestamp: new Date().toISOString(),
+  }).run();
+
+  return true;
+}
+
+/** Get recent regrid audit events for a bot (newest first). */
+export function getGridEvents(botId: number, limit = 50): GridEvent[] {
+  return gridDb.select().from(gridEvents)
+    .where(eq(gridEvents.botId, botId))
+    .orderBy(desc(gridEvents.id))
+    .limit(limit)
     .all();
 }
 
@@ -431,6 +560,11 @@ export function tickGridBot(botId: number): GridOrder | null {
   // Advance price simulation — GBM + mean-reversion step
   const currentPrice = advancePrice(bot.ticker);
   if (!currentPrice) return null;
+
+  // Task #56 — Auto-regrid on volatility drift (no-op unless opted in).
+  // Runs BEFORE level computation so the new levels apply to this tick.
+  maybeRegridFromDrift(bot, currentPrice);
+
   const levels = computeBotLevels(bot);
 
   // Range-exit stop-loss: if price has strayed beyond [lower*(1-buf), upper*(1+buf)],

@@ -161,6 +161,9 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
   const [atrMultiplierStr, setAtrMultiplierStr] = useState("1.0");
   const [stepMinPctStr, setStepMinPctStr] = useState("0.5");
   const [stepMaxPctStr, setStepMaxPctStr] = useState("5");
+  // Task #56 — opt-in adaptive regrid
+  const [autoRegridEnabled, setAutoRegridEnabled] = useState(false);
+  const [autoRegridDriftPctStr, setAutoRegridDriftPctStr] = useState("30");
 
   // Auto-range API — smart range + grid count suggestion
   const { data: autoRangeData } = useQuery<any>({
@@ -229,6 +232,11 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
       if (Number.isFinite(atrM)) payload.atrMultiplier = atrM;
       if (Number.isFinite(minP)) payload.stepMinPct = minP;
       if (Number.isFinite(maxP)) payload.stepMaxPct = maxP;
+      // Task #56 — adaptive regrid (opt-in)
+      if (autoRegridEnabled) {
+        const drift = parseFloat(autoRegridDriftPctStr) / 100;
+        if (Number.isFinite(drift) && drift > 0) payload.autoRegridDriftPct = drift;
+      }
     }
     createMutation.mutate(payload);
   }
@@ -323,7 +331,7 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
           <Label className="text-[11px] text-zinc-400 uppercase tracking-wider">Spacing Mode</Label>
           <span
             className="text-[10px] text-zinc-500 font-mono cursor-help"
-            title="Fixed: levels are evenly spaced across your range using the Grid Lines count. ATR: step size is sized from the ticker's recent realized volatility (Average True Range × multiplier) and clamped to your min/max. ATR mode is snapshotted at creation so level indices stay stable."
+            title="Fixed: levels are evenly spaced across your range using the Grid Lines count. ATR: step size is sized from the ticker's recent realized volatility (Average True Range × multiplier) and clamped to your min/max. The step re-derives each tick; the grid resizes only when no positions are open so level indices stay stable mid-cycle."
           >
             ⓘ what's this?
           </span>
@@ -390,6 +398,42 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
             <p className="col-span-2 text-[10px] text-zinc-500 font-mono leading-relaxed">
               Step = ATR × multiplier, clamped to [min, max] % of price. Grid Lines slider becomes a cap — the bot uses whatever count fits the ATR-derived step (≤ your cap).
             </p>
+            {/* Task #56 — Auto-regrid on volatility drift */}
+            <div className="col-span-2 mt-2 p-2.5 bg-[#0d0f12] border border-zinc-800 rounded space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  data-testid="checkbox-auto-regrid"
+                  checked={autoRegridEnabled}
+                  onChange={e => setAutoRegridEnabled(e.target.checked)}
+                  className="accent-[#00bcd4]"
+                />
+                <span className="text-[11px] text-zinc-300 font-mono uppercase tracking-wider">
+                  Auto-resize on volatility drift
+                </span>
+                <span
+                  className="text-[10px] text-zinc-500 font-mono cursor-help ml-auto"
+                  title="When live ATR drifts past this % from the ATR captured at creation (or the last regrid), the bot flattens its open buys at market, rebuilds its grid for the new volatility, and resumes. Every regrid is logged. OFF by default."
+                >
+                  ⓘ what's this?
+                </span>
+              </label>
+              {autoRegridEnabled && (
+                <div className="flex items-center gap-2">
+                  <Label className="text-[10px] text-zinc-500 uppercase tracking-wider whitespace-nowrap">
+                    Drift Threshold %
+                  </Label>
+                  <Input
+                    data-testid="input-auto-regrid-drift"
+                    value={autoRegridDriftPctStr}
+                    onChange={e => setAutoRegridDriftPctStr(e.target.value)}
+                    type="number" min={5} max={500} step={5}
+                    className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm w-24"
+                  />
+                  <span className="text-[10px] text-zinc-500 font-mono">e.g. 30 = regrid on ±30% ATR change</span>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
