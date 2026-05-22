@@ -19,6 +19,7 @@ import {
   startGridBotLoop,
   stopGridBotLoop,
   getGridEvents,
+  watchBreakerResume,
 } from "./grid-engine";
 import {
   autoTraderTick,
@@ -29,6 +30,8 @@ import {
   isAutoTraderRunning,
   scanForBreakouts,
   runWalkForwardBacktest,
+  resetCircuitBreaker,
+  isCircuitBreakerActive,
 } from "./auto-trader";
 
 // ─── V17: Telegram Alert Helper ─────────────────────────────────────────────
@@ -491,6 +494,26 @@ export async function registerRoutes(
       res.json({ status: "stopped" });
     } catch (err) {
       res.status(500).json({ message: "Failed to stop" });
+    }
+  });
+
+  // POST /api/auto-trader/breaker/reset — Task #68: operator-driven manual
+  // release of the daily-loss circuit breaker. 409 if the breaker isn't
+  // active so a fat-fingered double-click can't silently re-baseline
+  // dailyStart and mask a real drawdown. After clearing, we kick
+  // watchBreakerResume() synchronously so any grid bots parked in
+  // paused_by_breaker flip back to active in this request instead of
+  // waiting up to 5s for the next watcher tick.
+  app.post("/api/auto-trader/breaker/reset", requireAuth, (_req, res) => {
+    try {
+      if (!isCircuitBreakerActive()) {
+        return res.status(409).json({ message: "Circuit breaker is not active" });
+      }
+      resetCircuitBreaker({ manual: true });
+      try { watchBreakerResume(); } catch (_e) { /* non-fatal */ }
+      res.json(getAutoTraderState());
+    } catch (err) {
+      res.status(500).json({ message: "Failed to reset breaker" });
     }
   });
 
