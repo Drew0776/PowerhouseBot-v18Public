@@ -29,6 +29,7 @@ import { storage, getStockData, getStockByTicker } from "./storage";
 import {
   getAlpacaPrice,
   getAlpacaQuote,
+  getAlpacaPriceAgeMs,
   ALPACA_STOCK_TICKERS,
   startAlpacaFeed,
   stopAlpacaFeed,
@@ -1618,6 +1619,7 @@ export interface ScanDebugCandidate {
   gateFailed: ScanDebugGate;
   mtfBars: number;
   price: number;
+  priceAge: number; // ms since the last Alpaca quote; -1 if no cached price
 }
 
 export interface ScanDebugSnapshot {
@@ -1686,6 +1688,7 @@ export function getScanDebug(): ScanDebugSnapshot {
       gateFailed,
       mtfBars: mtfHist.length,
       price,
+      priceAge: getAlpacaPriceAgeMs(s.ticker),
     });
   }
 
