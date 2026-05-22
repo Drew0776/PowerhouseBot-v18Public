@@ -1585,6 +1585,36 @@ export function getAutoTraderState(): AutoTraderState {
   return { ...state, openPositions: [...state.openPositions] };
 }
 
+// Task #50: expose breaker state so the grid engine can mirror the auto-trader's
+// global hard-drawdown kill switch.
+export function isCircuitBreakerActive(): boolean {
+  return state.circuitBreakerActive;
+}
+
+/**
+ * Task #50 — Portfolio-driven breaker evaluator. Runs the same trip/reset
+ * logic as `checkCircuitBreaker()` but is safe to call when the auto-trader
+ * tick loop is NOT running, so grid-only deployments still get a global
+ * hard-drawdown kill switch. Initializes dailyStart on first call and rolls
+ * the day key over at ET midnight just like the auto-trader does.
+ */
+export function evaluateCircuitBreaker(): boolean {
+  try {
+    const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const todayKey = `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
+    const prevDateKey = dailyStart.dateKey;
+    const isNewDay = !!prevDateKey && prevDateKey !== todayKey;
+    if (dailyStart.tick === 0 || isNewDay) {
+      const p = storage.getPortfolio();
+      dailyStart.value = p.totalValue;
+      dailyStart.tick = Math.max(1, state.totalTicks); // mark initialized
+      dailyStart.dateKey = todayKey;
+    }
+    checkCircuitBreaker();
+  } catch (_e) { /* non-fatal */ }
+  return state.circuitBreakerActive;
+}
+
 export function isAutoTraderRunning(): boolean {
   return state.isRunning;
 }

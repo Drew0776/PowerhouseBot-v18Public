@@ -579,6 +579,13 @@ export async function registerRoutes(
     gridCount: z.number().int().min(2).max(50),
     totalInvestment: z.number().positive(),
     stopBufferPct: z.number().min(0).max(0.5).optional(),
+    // Task #50 — ATR spacing controls (all optional; defaults preserve
+    // legacy fixed-spacing behavior for clients that don't send them).
+    spacingMode: z.enum(["fixed", "atr"]).optional(),
+    atrWindow: z.number().int().min(2).max(200).optional(),
+    atrMultiplier: z.number().positive().max(20).optional(),
+    stepMinPct: z.number().min(0.0005).max(0.5).optional(),
+    stepMaxPct: z.number().min(0.001).max(1).optional(),
   });
 
   app.post("/api/grid/bots", requireAuth, (req, res) => {
@@ -587,7 +594,13 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: "Invalid bot config", errors: parsed.error.errors });
       }
-      const { ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct } = parsed.data;
+      const {
+        ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
+        spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
+      } = parsed.data;
+      if (stepMinPct !== undefined && stepMaxPct !== undefined && stepMinPct >= stepMaxPct) {
+        return res.status(400).json({ message: "stepMinPct must be < stepMaxPct" });
+      }
 
       if (lowerPrice >= upperPrice) {
         return res.status(400).json({ message: "Lower price must be below upper price" });
@@ -627,7 +640,10 @@ export async function registerRoutes(
         openedAt: new Date().toISOString(),
       });
 
-      const bot = createGridBot({ ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct });
+      const bot = createGridBot({
+        ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
+        spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
+      });
       res.json(bot);
     } catch (err) {
       res.status(500).json({ message: "Failed to create grid bot" });
@@ -762,10 +778,11 @@ export async function registerRoutes(
   // Auto-start the Alpaca price feed on server init so prices are live immediately
   startAlpacaFeed();
 
-  // Bug 5 fix: Resume background tick loops for any grid bots that were active at shutdown
-  for (const bot of getAllGridBots().filter(b => b.status === "active")) {
-    startGridBotLoop(bot.id);
-  }
+  // Task #50: Resume tick loops for grid bots that were active at shutdown
+  // AND start the global circuit-breaker watcher that auto-resumes bots
+  // parked by the auto-trader's hard-drawdown breaker once it recovers.
+  const { bootGridEngine } = await import("./grid-engine");
+  bootGridEngine();
 
   return httpServer;
 }

@@ -24,6 +24,7 @@ function pnlColor(n: number) {
 function statusBadge(status: string) {
   if (status === "active") return <Badge className="bg-[#00e676]/20 text-[#00e676] border-[#00e676]/30 text-[10px] px-1.5 py-0">LIVE</Badge>;
   if (status === "paused") return <Badge className="bg-yellow-400/20 text-yellow-400 border-yellow-400/30 text-[10px] px-1.5 py-0">PAUSED</Badge>;
+  if (status === "paused_by_breaker") return <Badge data-testid="badge-paused-by-breaker" className="bg-red-500/20 text-red-400 border-red-500/40 text-[10px] px-1.5 py-0" title="Global drawdown circuit breaker tripped — bot flattened all positions and will auto-resume once portfolio recovers">⚠ BREAKER</Badge>;
   if (status === "stopped_range_exit") return <Badge data-testid="badge-exited-range" className="bg-amber-500/20 text-amber-400 border-amber-500/40 text-[10px] px-1.5 py-0" title="Price exited the configured grid range — bot auto-closed all open positions">EXITED RANGE</Badge>;
   return <Badge className="bg-zinc-700 text-zinc-400 text-[10px] px-1.5 py-0">STOPPED</Badge>;
 }
@@ -154,6 +155,12 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
   const [gridCount, setGridCount] = useState(10);
   const [investment, setInvestment] = useState(Math.min(25, availableCash).toString());
   const [stopBufferPctStr, setStopBufferPctStr] = useState("5");
+  // Task #50 — ATR spacing controls
+  const [spacingMode, setSpacingMode] = useState<"fixed" | "atr">("fixed");
+  const [atrWindowStr, setAtrWindowStr] = useState("14");
+  const [atrMultiplierStr, setAtrMultiplierStr] = useState("1.0");
+  const [stepMinPctStr, setStepMinPctStr] = useState("0.5");
+  const [stepMaxPctStr, setStepMaxPctStr] = useState("5");
 
   // Auto-range API — smart range + grid count suggestion
   const { data: autoRangeData } = useQuery<any>({
@@ -204,14 +211,26 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
 
   function handleCreate() {
     if (!isValid) return;
-    createMutation.mutate({
+    const payload: any = {
       ticker: ticker.toUpperCase(),
       lowerPrice: lowerNum,
       upperPrice: upperNum,
       gridCount,
       totalInvestment: investNum,
       stopBufferPct: stopBufferPctNum / 100,
-    });
+      spacingMode,
+    };
+    if (spacingMode === "atr") {
+      const atrW = parseInt(atrWindowStr);
+      const atrM = parseFloat(atrMultiplierStr);
+      const minP = parseFloat(stepMinPctStr) / 100;
+      const maxP = parseFloat(stepMaxPctStr) / 100;
+      if (Number.isFinite(atrW)) payload.atrWindow = atrW;
+      if (Number.isFinite(atrM)) payload.atrMultiplier = atrM;
+      if (Number.isFinite(minP)) payload.stepMinPct = minP;
+      if (Number.isFinite(maxP)) payload.stepMaxPct = maxP;
+    }
+    createMutation.mutate(payload);
   }
 
   return (
@@ -296,6 +315,83 @@ function CreateBotForm({ onCreated, availableCash }: CreateBotFormProps) {
           <span>3 (wider gaps, bigger profit)</span>
           <span>30 (tight, high frequency)</span>
         </div>
+      </div>
+
+      {/* Spacing Mode (Task #50) */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label className="text-[11px] text-zinc-400 uppercase tracking-wider">Spacing Mode</Label>
+          <span
+            className="text-[10px] text-zinc-500 font-mono cursor-help"
+            title="Fixed: levels are evenly spaced across your range using the Grid Lines count. ATR: step size is sized from the ticker's recent realized volatility (Average True Range × multiplier) and clamped to your min/max. ATR mode is snapshotted at creation so level indices stay stable."
+          >
+            ⓘ what's this?
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {(["fixed", "atr"] as const).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              data-testid={`spacing-mode-${mode}`}
+              onClick={() => setSpacingMode(mode)}
+              className={`px-3 py-2 text-xs font-mono uppercase tracking-wider rounded border transition-all ${
+                spacingMode === mode
+                  ? "bg-[#00bcd4]/10 border-[#00bcd4] text-[#00bcd4]"
+                  : "bg-[#0d0f12] border-zinc-700 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {mode === "fixed" ? "Fixed %" : "ATR-Sized"}
+            </button>
+          ))}
+        </div>
+        {spacingMode === "atr" && (
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <div className="space-y-1">
+              <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">ATR Window</Label>
+              <Input
+                data-testid="input-atr-window"
+                value={atrWindowStr}
+                onChange={e => setAtrWindowStr(e.target.value)}
+                type="number" min={2} max={200} step={1}
+                className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">ATR Multiplier</Label>
+              <Input
+                data-testid="input-atr-multiplier"
+                value={atrMultiplierStr}
+                onChange={e => setAtrMultiplierStr(e.target.value)}
+                type="number" min={0.1} max={20} step={0.1}
+                className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">Min Step %</Label>
+              <Input
+                data-testid="input-step-min-pct"
+                value={stepMinPctStr}
+                onChange={e => setStepMinPctStr(e.target.value)}
+                type="number" min={0.05} max={50} step={0.05}
+                className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">Max Step %</Label>
+              <Input
+                data-testid="input-step-max-pct"
+                value={stepMaxPctStr}
+                onChange={e => setStepMaxPctStr(e.target.value)}
+                type="number" min={0.1} max={100} step={0.1}
+                className="bg-[#0d0f12] border-zinc-700 font-mono text-white h-8 text-sm"
+              />
+            </div>
+            <p className="col-span-2 text-[10px] text-zinc-500 font-mono leading-relaxed">
+              Step = ATR × multiplier, clamped to [min, max] % of price. Grid Lines slider becomes a cap — the bot uses whatever count fits the ATR-derived step (≤ your cap).
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Range Stop Buffer */}
