@@ -516,10 +516,16 @@ function closeAllOpenPositions(bot: GridBot, marketPrice: number): void {
   }
 
   const newPnl = Math.round((bot.realizedPnl + pnlDelta) * 100) / 100;
+  const newFills = bot.totalGridFills + fillsDelta;
   gridDb.update(gridBots).set({
     realizedPnl: newPnl,
-    totalGridFills: bot.totalGridFills + fillsDelta,
+    totalGridFills: newFills,
   }).where(eq(gridBots.id, bot.id)).run();
+  // Keep the in-memory bot reference in sync so any subsequent writes inside
+  // the same tick don't overwrite the just-persisted flatten deltas with
+  // stale pre-flatten values.
+  bot.realizedPnl = newPnl;
+  bot.totalGridFills = newFills;
 }
 
 /**
@@ -562,8 +568,11 @@ export function tickGridBot(botId: number): GridOrder | null {
   if (!currentPrice) return null;
 
   // Task #56 — Auto-regrid on volatility drift (no-op unless opted in).
-  // Runs BEFORE level computation so the new levels apply to this tick.
-  maybeRegridFromDrift(bot, currentPrice);
+  // If a regrid is applied this tick we end early: positions were just
+  // flattened at market and the grid was rebuilt, so any further fill in the
+  // same tick would race the freshly-persisted bot state. The next 3 s tick
+  // will trade against the new grid.
+  if (maybeRegridFromDrift(bot, currentPrice)) return null;
 
   const levels = computeBotLevels(bot);
 
