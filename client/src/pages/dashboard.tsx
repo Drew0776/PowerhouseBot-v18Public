@@ -47,6 +47,7 @@ interface ScanDebugCandidate {
   gateFailed: ScanDebugGate;
   mtfBars: number;
   price: number;
+  priceAge: number; // ms since the last Alpaca quote; -1 if no cached price
 }
 interface ScanDebugSnapshot {
   passed: number;
@@ -536,7 +537,7 @@ export default function Dashboard() {
                             {items.slice(0, 20).map((c) => (
                               <span
                                 key={c.ticker}
-                                title={`score=${c.score ?? "—"} · mtfBars=${c.mtfBars} · price=$${c.price.toFixed(2)}`}
+                                title={`score=${c.score ?? "—"} · mtfBars=${c.mtfBars} · price=$${c.price.toFixed(2)} · priceAge=${c.priceAge < 0 ? "n/a" : `${Math.round(c.priceAge / 1000)}s`}`}
                                 className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0d0f12] border border-zinc-700 text-zinc-300"
                               >
                                 {c.ticker}

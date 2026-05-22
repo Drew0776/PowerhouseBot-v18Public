@@ -258,6 +258,18 @@ export function getAlpacaMid(ticker: string): { price: number; bid: number; ask:
   return { price: entry.price, bid: entry.bid, ask: entry.ask };
 }
 
+/**
+ * Task #69: age in ms of the most recent Alpaca price for `ticker`, or
+ * `-1` if we've never received one. Distinct from `getAlpacaPrice`,
+ * which returns `null` once an entry crosses STALE_THRESHOLD — for
+ * diagnostics we want to surface stale ages too.
+ */
+export function getAlpacaPriceAgeMs(ticker: string): number {
+  const entry = priceCache.get(ticker);
+  if (!entry) return -1;
+  return Date.now() - entry.fetchedAt;
+}
+
 /** Bid/ask snapshot used by the order layer for limit-pricing decisions. */
 export function getAlpacaQuote(ticker: string): { bid: number; ask: number; mid: number; freshMs: number } | null {
   const entry = priceCache.get(ticker);
