@@ -28,12 +28,50 @@
 import { storage, getStockData, getStockByTicker } from "./storage";
 import {
   getAlpacaPrice,
+  getAlpacaQuote,
   ALPACA_STOCK_TICKERS,
   startAlpacaFeed,
   stopAlpacaFeed,
   getAlpacaStatus,
 } from "./alpaca";
 import type { StockData } from "@shared/schema";
+
+// ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
+//
+// Replaces the prior "market order at currentPrice" execution path. Entries
+// submit limit orders priced at-or-just-inside the current bid/ask; exits use
+// limit (take-profit) or stop-limit (stop-loss) prices with a configurable
+// slippage tolerance. If a limit isn't filled within ENTRY_FILL_WINDOW ticks
+// it is repriced once, then cancelled.
+
+/** Max slippage (as a fraction of price) we'll accept relative to the limit. */
+const ENTRY_SLIPPAGE_TOL = 0.0015;   // 0.15% above mid for buy entries
+const ENTRY_REPRICE_TOL  = 0.0035;   // 0.35% above mid on the single reprice
+const EXIT_SLIPPAGE_TOL  = 0.0025;   // 0.25% allowed past stop on stop-limit exits
+/** How many ticks a pending entry order stays live before being repriced/cancelled. */
+const ENTRY_FILL_WINDOW  = 3;
+const ENTRY_MAX_ATTEMPTS = 2;        // 1 initial + 1 reprice
+
+interface PendingEntry {
+  sig: BreakoutSignal;
+  limitPrice: number;
+  submittedAtTick: number;
+  attempts: number;
+  status: "working" | "filled" | "cancelled";
+}
+
+const pendingEntries: PendingEntry[] = [];
+
+/** Compute a limit price for a buy entry: at-or-just-inside the current ask. */
+function computeEntryLimitPrice(sig: BreakoutSignal, tol: number): number {
+  const q = getAlpacaQuote(sig.ticker);
+  if (q && q.ask > 0 && q.bid > 0) {
+    // Pay at most ask + tol (just-inside-ask, with tolerance for fast tape).
+    return Math.round(Math.min(q.ask, q.mid * (1 + tol)) * 10000) / 10000;
+  }
+  // No live quote — fall back to signal entry price with tolerance.
+  return Math.round(sig.entryPrice * (1 + tol) * 10000) / 10000;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -671,7 +709,19 @@ function updateStats() {
   };
 }
 
-// ─── Enter Trade ──────────────────────────────────────────────────────────────
+// ─── Enter Trade — Limit-Order Submission (Task #49) ─────────────────────────
+//
+// enterTrade no longer fills at market on the spot. It runs the eligibility
+// checks and then either:
+//   (a) submits a pending limit order priced at-or-just-inside the current
+//       ask (see computeEntryLimitPrice), or
+//   (b) returns null if any pre-trade gate rejects.
+//
+// The pending order is filled, repriced, or cancelled by tickPendingEntries()
+// in subsequent autoTraderTick() calls. The function returns the ActivePosition
+// only when the order fills immediately (a marketable limit against current
+// price); otherwise it returns null and the caller treats it as "no entry
+// this tick".
 
 function enterTrade(sig: BreakoutSignal): ActivePosition | null {
   if (state.circuitBreakerActive) return null;
@@ -684,6 +734,7 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
   const portfolio = storage.getPortfolio();
   if (portfolio.cash < sig.positionSize) return null;
   if (state.openPositions.some(p => p.ticker === sig.ticker)) return null;
+  if (pendingEntries.some(p => p.status === "working" && p.sig.ticker === sig.ticker)) return null;
 
   // V12: Capital recycling — if full AND new signal is A+, close worst position
   if (state.openPositions.length >= MAX_POSITIONS) {
@@ -754,24 +805,69 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
     }
   }
 
-  const entrySlip = slippage(sig.shares, sig.entryPrice, mt);
-  state.totalSlippageCost = Math.round((state.totalSlippageCost + entrySlip) * 10000) / 10000;
-  const adjEntry = sig.entryPrice + entrySlip / Math.max(sig.shares, 0.0001);
+  // Task #49: Submit a pending LIMIT order priced at-or-just-inside the ask
+  // (or with ENTRY_SLIPPAGE_TOL above the simulated mid when no quote exists).
+  // The actual fill / reprice / cancel is handled by tickPendingEntries().
+  const limitPrice = computeEntryLimitPrice(sig, ENTRY_SLIPPAGE_TOL);
+  const pending: PendingEntry = {
+    sig: { ...sig, marketType: mt },
+    limitPrice,
+    submittedAtTick: state.totalTicks,
+    attempts: 1,
+    status: "working",
+  };
+  pendingEntries.push(pending);
+  log(`📋 LIMIT BUY | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${limitPrice.toFixed(4)} (mid $${sig.entryPrice.toFixed(4)}) | working ≤${ENTRY_FILL_WINDOW}t`);
+
+  // Try an immediate marketable-limit fill (current price already at-or-below limit).
+  const filled = fillPendingEntry(pending);
+  return filled;
+}
+
+/**
+ * Attempt to fill a pending limit entry against the current market.
+ * A buy limit fills when the current price is ≤ limitPrice. Returns the
+ * created ActivePosition on fill, otherwise null (the order stays "working").
+ */
+function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
+  if (pending.status !== "working") return null;
+  const sig = pending.sig;
+  const mt = sig.marketType;
+
+  // Re-check eligibility — circuit breaker / event blackout may have flipped
+  // since submission, and an open position for this ticker may have appeared.
+  if (state.circuitBreakerActive) { cancelPending(pending, "circuit_breaker"); return null; }
+  if (activeEvent(state.totalTicks)) { cancelPending(pending, "event_blackout"); return null; }
+  if (state.openPositions.some(p => p.ticker === sig.ticker)) { cancelPending(pending, "duplicate"); return null; }
+  if (state.openPositions.length >= MAX_POSITIONS) { cancelPending(pending, "no_slot"); return null; }
+
+  const stock = getStockByTicker(sig.ticker);
+  if (!stock) { cancelPending(pending, "no_stock"); return null; }
+  const curPrice = stock.price;
+
+  // Buy limit fills only when market trades at or below the limit.
+  if (!(curPrice > 0) || curPrice > pending.limitPrice) return null;
+
+  // Final cash check (price-adjusted to actual fill).
+  const fillPrice = curPrice; // limit fills at the better of (limit, current)
+  const portfolio = storage.getPortfolio();
+  const total = fillPrice * sig.shares;
+  if (total > portfolio.cash) { cancelPending(pending, "insufficient_cash"); return null; }
 
   const trade = storage.createTrade({
     ticker: sig.ticker, action: "buy", shares: sig.shares,
-    price: adjEntry, total: sig.positionSize + entrySlip,
+    price: fillPrice, total,
     stopLoss: sig.stopLoss, takeProfit: sig.takeProfit2,
     openedAt: new Date().toISOString(),
   });
 
   const pos: ActivePosition = {
     tradeId: trade.id, ticker: sig.ticker,
-    entryPrice: adjEntry, currentPrice: adjEntry,
+    entryPrice: fillPrice, currentPrice: fillPrice,
     shares: sig.shares, sharesRemaining: sig.shares,
     stopLoss: sig.stopLoss, trailingStop: sig.stopLoss,
     takeProfit1: sig.takeProfit1, takeProfit2: sig.takeProfit2,
-    highWaterMark: adjEntry, pnl: 0, pnlPct: 0,
+    highWaterMark: fillPrice, pnl: 0, pnlPct: 0,
     strategy: sig.strategy, grade: sig.grade,
     enteredAt: new Date().toISOString(),
     tier1Hit: false, status: "running",
@@ -780,10 +876,55 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
 
   state.openPositions.push(pos);
   state.totalTrades++;
+  pending.status = "filled";
 
-  log(`ENTER ${sig.grade} #${(sig as any).rank || '?'} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${adjEntry.toFixed(4)} | Stop $${sig.stopLoss.toFixed(4)} | T1 $${sig.takeProfit1.toFixed(4)} (+${(((sig.takeProfit1-adjEntry)/adjEntry)*100).toFixed(2)}%) | Score ${sig.score}`);
-
+  log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${fillPrice.toFixed(4)} (limit $${pending.limitPrice.toFixed(4)}) | Stop $${sig.stopLoss.toFixed(4)} | T1 $${sig.takeProfit1.toFixed(4)} | Score ${sig.score}`);
   return pos;
+}
+
+function cancelPending(pending: PendingEntry, reason: string): void {
+  pending.status = "cancelled";
+  log(`🚫 LIMIT CANCEL | ${pending.sig.ticker} | $${pending.limitPrice.toFixed(4)} | ${reason}`);
+}
+
+/**
+ * Tick the pending-orders queue. For each working order:
+ *   1. Try to fill at the current price (marketable limit).
+ *   2. If still working past ENTRY_FILL_WINDOW ticks, reprice once at a slightly
+ *      more aggressive level (ENTRY_REPRICE_TOL above mid).
+ *   3. If still unfilled past the second window, cancel — the bot is never
+ *      left holding a phantom working order.
+ * Returns the list of newly-filled positions (for logging by the caller).
+ */
+function tickPendingEntries(): ActivePosition[] {
+  const filled: ActivePosition[] = [];
+  for (const pe of pendingEntries) {
+    if (pe.status !== "working") continue;
+
+    // First attempt
+    const pos = fillPendingEntry(pe);
+    if (pos) { filled.push(pos); continue; }
+
+    const age = state.totalTicks - pe.submittedAtTick;
+    if (pe.attempts < ENTRY_MAX_ATTEMPTS && age >= ENTRY_FILL_WINDOW) {
+      // Reprice once — more aggressive limit.
+      const newLimit = computeEntryLimitPrice(pe.sig, ENTRY_REPRICE_TOL);
+      log(`🔁 LIMIT REPRICE | ${pe.sig.ticker} | $${pe.limitPrice.toFixed(4)} → $${newLimit.toFixed(4)}`);
+      pe.limitPrice = newLimit;
+      pe.attempts++;
+      pe.submittedAtTick = state.totalTicks;
+      const re = fillPendingEntry(pe);
+      if (re) filled.push(re);
+    } else if (pe.attempts >= ENTRY_MAX_ATTEMPTS && age >= ENTRY_FILL_WINDOW) {
+      cancelPending(pe, "fill_window_expired");
+    }
+  }
+
+  // Garbage-collect completed pendings so the queue doesn't grow unbounded.
+  for (let i = pendingEntries.length - 1; i >= 0; i--) {
+    if (pendingEntries[i].status !== "working") pendingEntries.splice(i, 1);
+  }
+  return filled;
 }
 
 // ─── Manage Positions ─────────────────────────────────────────────────────────
@@ -877,10 +1018,42 @@ function managePositions() {
     if (exitReason) pos.status = exitStatus;
 
     if (exitReason) {
-      const exitSlip = slippage(pos.sharesRemaining, pos.currentPrice, mt);
-      const closePnl = Math.round(((pos.currentPrice - pos.entryPrice) * pos.sharesRemaining - exitSlip) * 100) / 100;
+      // Task #49: pick a limit / stop-limit fill price instead of paying
+      // arbitrary market slippage. T1/T2 fills go off at the take-profit
+      // level (already handled for T1 above). Stop-style exits become
+      // stop-limit: if the market gapped past stop * (1 - EXIT_SLIPPAGE_TOL),
+      // we accept the gapped fill at currentPrice; otherwise we fill at the
+      // stop level itself with zero slippage.
+      let fillPx: number;
+      let exitSlip: number;
+      const q = ALPACA_STOCK_TICKERS.has(pos.ticker) ? getAlpacaQuote(pos.ticker) : null;
+      const bid = q && q.bid > 0 ? q.bid : pos.currentPrice;
+
+      if (exitReason === "full_target") {
+        // T2 limit fill at the take-profit price
+        fillPx = pos.takeProfit2;
+        exitSlip = 0;
+      } else if (exitReason === "trail_lock" || exitReason === "stopped_out") {
+        // Stop-limit: fill at stop level if market hasn't gapped past tolerance
+        const stopLimit = pos.trailingStop;
+        const worstFill = stopLimit * (1 - EXIT_SLIPPAGE_TOL);
+        if (bid >= worstFill) {
+          fillPx = stopLimit;
+          exitSlip = 0;
+        } else {
+          // Gapped past stop-limit band — fall back to current price with slippage
+          fillPx = pos.currentPrice;
+          exitSlip = slippage(pos.sharesRemaining, pos.currentPrice, mt);
+        }
+      } else {
+        // Time-based / momentum / circuit-breaker exits — limit at current bid
+        fillPx = bid;
+        exitSlip = 0;
+      }
+
+      const closePnl = Math.round(((fillPx - pos.entryPrice) * pos.sharesRemaining - exitSlip) * 100) / 100;
       state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
-      storage.closeTrade(pos.tradeId, pos.currentPrice, exitSlip); // V17: pass slippage for P&L sync
+      storage.closeTrade(pos.tradeId, fillPx, exitSlip); // V17: pass slippage for P&L sync
       toClose.push(i);
 
       state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
@@ -982,21 +1155,32 @@ export function autoTraderTick(): { signals: BreakoutSignal[]; entered: ActivePo
   managePositions();
   const exited = prevOpen.filter(t => !state.openPositions.some(p => p.ticker === t));
 
+  // Task #49: Tick the pending limit-order queue BEFORE scanning for new
+  // signals. Working limits get a fresh fill attempt; expired ones reprice
+  // once and then cancel cleanly.
+  const filledFromPending = tickPendingEntries();
+  let entered: ActivePosition | null = filledFromPending[0] ?? null;
+
   const signals = scanForBreakouts();
 
   // V9: Enter up to 2 per tick when slots available (fast capital deployment)
-  let entered: ActivePosition | null = null;
   if (!state.circuitBreakerActive && !state.eventFilterActive) {
     const portfolio = storage.getPortfolio();
-    const slotsAvail = MAX_POSITIONS - state.openPositions.length;
     const maxEnter = portfolio.totalValue >= 150 ? 2 : 1;
-    let entered_count = 0;
+    // Count both filled positions AND working pending limits against the cap.
+    const slotsTaken = state.openPositions.length + pendingEntries.filter(p => p.status === "working").length;
+    let entered_count = filledFromPending.length;
 
     // Take top signals by rank (already sorted)
     for (const sig of signals.slice(0, 6)) {
-      if (entered_count >= maxEnter || state.openPositions.length >= MAX_POSITIONS) break;
+      if (entered_count >= maxEnter) break;
+      if (slotsTaken + (entered_count - filledFromPending.length) >= MAX_POSITIONS) break;
       const pos = enterTrade(sig);
       if (pos) { entered = pos; entered_count++; }
+      else if (pendingEntries.some(p => p.status === "working" && p.sig.ticker === sig.ticker)) {
+        // Limit submitted but not yet filled — still consumes one of this tick's slots.
+        entered_count++;
+      }
     }
   }
 
@@ -1260,6 +1444,7 @@ export function startAutoTrader() {
   _hotTickers.clear();
   bullishTickers.clear();
   cooldowns.clear();
+  pendingEntries.length = 0; // Task #49: drop any stale working limits across restarts
   t1HitCount = 0;
   maxHoldCount = 0;
 
@@ -1450,6 +1635,7 @@ export function resetAutoTraderState() {
   _prices.clear(); _seeds.clear(); _mtf.clear();
   _trendStartTick.clear(); _hotTickers.clear();
   bullishTickers.clear(); cooldowns.clear();
+  pendingEntries.length = 0; // Task #49: drop pending limits on full reset
 
   // Reset daily tracking
   dailyStart.value = 100;
