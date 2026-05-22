@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect, memo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Trade } from "@shared/schema";
@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { Search, Trophy, Skull, TrendingUp, TrendingDown, Download } from "lucide-react";
+import { Search, Trophy, Skull, Download } from "lucide-react";
 import { Link } from "wouter";
 
 interface TradesResponse {
@@ -121,6 +121,133 @@ function CumulativePnlChart({ trades }: { trades: Trade[] }) {
   );
 }
 
+// ── Virtualized trade row ──────────────────────────────────────────────────
+// Memoized so it only re-renders when its own trade changes. With thousands of
+// trades in the log, this keeps streamed inserts cheap: existing rows never
+// re-render when a new trade is appended.
+const ROW_HEIGHT = 36;
+
+type RowProps = {
+  trade: Trade;
+  top: number;
+  onClose: (id: number) => void;
+  isClosing: boolean;
+};
+
+const TradeRow = memo(function TradeRow({ trade: t, top, onClose, isClosing }: RowProps) {
+  return (
+    <div
+      className="absolute left-0 right-0 grid items-center border-b border-border/50 hover:bg-accent/30 transition-colors text-xs"
+      style={{
+        top,
+        height: ROW_HEIGHT,
+        gridTemplateColumns: "minmax(80px,1fr) 64px 80px 88px 88px 80px 96px 96px 84px",
+      }}
+    >
+      <div className="px-3">
+        <Link href={`/stock/${t.ticker}`}>
+          <span className="font-mono font-semibold text-[#00bcd4] cursor-pointer hover:underline">{t.ticker}</span>
+        </Link>
+      </div>
+      <div className="px-3">
+        <span className={`text-[10px] uppercase font-semibold ${t.action === "buy" ? "text-[#00e676]" : "text-[#ff1744]"}`}>
+          {t.action}
+        </span>
+      </div>
+      <div className="px-3 text-right font-mono tabular-nums">{(t.shares ?? 0).toFixed(4)}</div>
+      <div className="px-3 text-right font-mono tabular-nums">${(t.price ?? 0).toFixed(2)}</div>
+      <div className="px-3 text-right font-mono tabular-nums">${(t.total ?? 0).toFixed(2)}</div>
+      <div className="px-3 text-center">
+        <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${t.status === "open" ? "bg-[rgba(0,188,212,0.15)] text-[#00bcd4]" : "bg-muted text-muted-foreground"}`}>
+          {t.status.toUpperCase()}
+        </span>
+      </div>
+      <div className="px-3 text-right font-mono tabular-nums">
+        {t.pnl !== null ? (
+          <span style={{ color: t.pnl >= 0 ? "#00e676" : "#ff1744" }}>
+            {t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}
+          </span>
+        ) : "—"}
+      </div>
+      <div className="px-3 text-[10px] text-muted-foreground font-mono">
+        {new Date(t.openedAt).toLocaleDateString()}
+      </div>
+      <div className="px-3">
+        {t.status === "open" && (
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-6 text-[10px] px-2"
+            disabled={isClosing}
+            onClick={() => onClose(t.id)}
+            data-testid={`close-${t.id}`}
+          >
+            Close
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+});
+
+function VirtualTradeList({
+  trades,
+  onClose,
+  isClosing,
+}: {
+  trades: Trade[];
+  onClose: (id: number) => void;
+  isClosing: boolean;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(420);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setViewportH(el.clientHeight);
+    const onResize = () => setViewportH(el.clientHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop);
+  }, []);
+
+  const overscan = 6;
+  const startIdx = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - overscan);
+  const endIdx = Math.min(trades.length, Math.ceil((scrollTop + viewportH) / ROW_HEIGHT) + overscan);
+  const visible = trades.slice(startIdx, endIdx);
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={onScroll}
+      className="relative overflow-auto"
+      style={{ height: Math.min(420, Math.max(120, trades.length * ROW_HEIGHT)) || 120 }}
+    >
+      <div style={{ height: trades.length * ROW_HEIGHT, position: "relative" }}>
+        {visible.map((t, i) => (
+          <TradeRow
+            key={t.id}
+            trade={t}
+            top={(startIdx + i) * ROW_HEIGHT}
+            onClose={onClose}
+            isClosing={isClosing}
+          />
+        ))}
+        {trades.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-xs">
+            No trades match filter
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function TradeLog() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -142,6 +269,8 @@ export default function TradeLog() {
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
+
+  const handleClose = useCallback((id: number) => closeMutation.mutate(id), [closeMutation]);
 
   if (isLoading) return <div className="p-6"><Skeleton className="h-96" /></div>;
 
@@ -289,81 +418,33 @@ export default function TradeLog() {
         <span className="text-[10px] text-muted-foreground ml-auto">{filtered.length} trades</span>
       </div>
 
-      {/* Trades table */}
+      {/* Virtualized trade list — windowed so render cost stays flat regardless
+          of how many trades exist. */}
       <div className="rounded-lg border border-border overflow-hidden" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border" style={{ backgroundColor: "hsl(220 18% 6%)" }}>
-                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Ticker</th>
-                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Action</th>
-                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Shares</th>
-                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Price</th>
-                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Total</th>
-                <th className="px-3 py-2 text-center text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Status</th>
-                <th className="px-3 py-2 text-right text-[10px] uppercase tracking-wider font-medium text-muted-foreground">P&L</th>
-                <th className="px-3 py-2 text-left text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Opened</th>
-                <th className="px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(t => (
-                <tr key={t.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
-                  <td className="px-3 py-2">
-                    <Link href={`/stock/${t.ticker}`}>
-                      <span className="font-mono font-semibold text-[#00bcd4] cursor-pointer hover:underline">{t.ticker}</span>
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className={`text-[10px] uppercase font-semibold ${t.action === "buy" ? "text-[#00e676]" : "text-[#ff1744]"}`}>
-                      {t.action}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums">{(t.shares ?? 0).toFixed(4)}</td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums">${(t.price ?? 0).toFixed(2)}</td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums">${(t.total ?? 0).toFixed(2)}</td>
-                  <td className="px-3 py-2 text-center">
-                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${t.status === "open" ? "bg-[rgba(0,188,212,0.15)] text-[#00bcd4]" : "bg-muted text-muted-foreground"}`}>
-                      {t.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums">
-                    {t.pnl !== null ? (
-                      <span style={{ color: t.pnl >= 0 ? "#00e676" : "#ff1744" }}>
-                        {t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}
-                      </span>
-                    ) : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-[10px] text-muted-foreground font-mono">
-                    {new Date(t.openedAt).toLocaleDateString()}
-                  </td>
-                  <td className="px-3 py-2">
-                    {t.status === "open" && (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        className="h-6 text-[10px] px-2"
-                        disabled={closeMutation.isPending}
-                        onClick={() => closeMutation.mutate(t.id)}
-                        data-testid={`close-${t.id}`}
-                      >
-                        Close
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {filtered.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">
-                    {trades.length === 0 ? "No trades yet — execute your first paper trade!" : "No trades match filter"}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div
+          className="grid items-center border-b border-border px-0 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground"
+          style={{
+            backgroundColor: "hsl(220 18% 6%)",
+            gridTemplateColumns: "minmax(80px,1fr) 64px 80px 88px 88px 80px 96px 96px 84px",
+          }}
+        >
+          <div className="px-3 text-left">Ticker</div>
+          <div className="px-3 text-left">Action</div>
+          <div className="px-3 text-right">Shares</div>
+          <div className="px-3 text-right">Price</div>
+          <div className="px-3 text-right">Total</div>
+          <div className="px-3 text-center">Status</div>
+          <div className="px-3 text-right">P&amp;L</div>
+          <div className="px-3 text-left">Opened</div>
+          <div className="px-3">Action</div>
         </div>
+        <VirtualTradeList trades={filtered} onClose={handleClose} isClosing={closeMutation.isPending} />
       </div>
+      {trades.length === 0 && (
+        <div className="text-center text-muted-foreground text-xs">
+          No trades yet — execute your first paper trade!
+        </div>
+      )}
     </div>
   );
 }
