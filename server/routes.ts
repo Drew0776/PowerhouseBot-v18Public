@@ -32,6 +32,7 @@ import {
   runWalkForwardBacktest,
   resetCircuitBreaker,
   isCircuitBreakerActive,
+  getScanDebug,
 } from "./auto-trader";
 
 // ─── V17: Telegram Alert Helper ─────────────────────────────────────────────
@@ -537,6 +538,17 @@ export async function registerRoutes(
       res.json(signals);
     } catch (err) {
       res.status(500).json({ message: "Failed to scan" });
+    }
+  });
+
+  // GET /api/auto-trader/scan-debug — Task #69: per-ticker rejection reasons
+  // so the operator can see WHY the scanner returned []. Read-only — does
+  // not advance prices, mutate MTF, or write to the event log.
+  app.get("/api/auto-trader/scan-debug", requireAuth, (_req, res) => {
+    try {
+      res.json(getScanDebug());
+    } catch (err) {
+      res.status(500).json({ message: "Failed to scan-debug" });
     }
   });
 

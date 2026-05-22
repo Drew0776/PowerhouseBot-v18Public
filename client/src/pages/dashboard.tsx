@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import type { PortfolioSummary, GridBot } from "@shared/schema";
 import KpiCards from "@/components/kpi-cards";
@@ -34,7 +35,35 @@ interface AlpacaStatus {
   nextRetryInMs: number;
   freshTickers: number;
   trackedTickers: number;
+  // Task #69: surfaced so the dashboard can show the real Alpaca paper
+  // account balance alongside the simulator's $500-start figure.
+  account?: { status: string; portfolioValue: number; cash: number; buyingPower: number } | null;
 }
+
+type ScanDebugGate = "mtf" | "rsi" | "bollinger" | "score" | "cooldown" | "open_position" | null;
+interface ScanDebugCandidate {
+  ticker: string;
+  score: number | null;
+  gateFailed: ScanDebugGate;
+  mtfBars: number;
+  price: number;
+}
+interface ScanDebugSnapshot {
+  passed: number;
+  rejected: number;
+  topReason: ScanDebugGate;
+  totalTicks: number;
+  candidates: ScanDebugCandidate[];
+}
+
+const GATE_LABELS: Record<Exclude<ScanDebugGate, null>, string> = {
+  mtf: "trend (MTF)",
+  rsi: "RSI out of range",
+  bollinger: "Bollinger too low",
+  score: "composite score < 20",
+  cooldown: "cooldown",
+  open_position: "already open",
+};
 
 interface GridBotSummary {
   bot: GridBot;
@@ -227,6 +256,17 @@ export default function Dashboard() {
     refetchInterval: 5000,
   });
 
+  // Task #69: pull the scanner's per-ticker rejection reasons so the
+  // operator can see WHY the scanner returned [] (warm-up? flat markets?
+  // breaker? cooldown?). Polled at the same cadence as /scan so the
+  // "X passed / Y rejected" line stays in sync with the firing-signals card.
+  const { data: scanDebug } = useQuery<ScanDebugSnapshot>({
+    queryKey: ["/api/auto-trader/scan-debug"],
+    queryFn: async () => { const r = await apiRequest("GET", "/api/auto-trader/scan-debug"); return r.json(); },
+    refetchInterval: 5000,
+  });
+  const [showRejected, setShowRejected] = useState(false);
+
   // Task #68: manual daily-loss breaker reset. The mutation is gated on the
   // server (409 when !circuitBreakerActive), so the button is also hidden
   // client-side when circuitBreakerActive is false to avoid the round-trip.
@@ -264,6 +304,39 @@ export default function Dashboard() {
       <MarketBar />
 
       <div className="p-4 md:p-6 space-y-4">
+        {/* ── Task #69: Dual-balance — make it impossible to confuse the bot's
+             $500 simulation with the real Alpaca paper account. The bot trades
+             a sandboxed portfolio against real Alpaca prices; it does NOT
+             place orders in your Alpaca account. ── */}
+        <div
+          className="bg-[#141720] border border-zinc-800 rounded-xl p-3 md:p-4"
+          data-testid="dual-balance"
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-mono">Simulator (paper)</p>
+              <p className="text-lg md:text-xl font-mono font-bold text-white" data-testid="balance-sim">
+                {portfolio ? `$${portfolio.totalValue.toFixed(2)}` : "—"}
+              </p>
+              <p className="text-[10px] text-zinc-500 mt-0.5 font-mono">what the bot manages today</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-mono">Alpaca paper account</p>
+              <p className="text-lg md:text-xl font-mono font-bold text-white" data-testid="balance-alpaca">
+                {alpacaStatus?.account
+                  ? `$${alpacaStatus.account.portfolioValue.toFixed(2)}`
+                  : alpacaStatus?.connected === false
+                    ? "offline"
+                    : "—"}
+              </p>
+              <p className="text-[10px] text-zinc-500 mt-0.5 font-mono">read-only, untouched by the bot</p>
+            </div>
+          </div>
+          <p className="text-[10px] text-zinc-500 mt-2 font-mono leading-relaxed">
+            The bot trades a $500 simulation against real Alpaca prices. It does not place orders in your Alpaca account.
+          </p>
+        </div>
+
         {/* ── At-a-glance hero row: the only four numbers a working trader needs ── */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3" data-testid="dashboard-hero">
           <FeedStatusHero status={alpacaStatus} />
@@ -420,6 +493,71 @@ export default function Dashboard() {
 
           {/* Signals: top firing signals across the universe */}
           <TabsContent value="signals" className="space-y-3 mt-3">
+            {/* Task #69: pulse line + collapsible Rejected candidates panel.
+                Always show the X passed / Y rejected summary so a glance
+                answers "is the bot warm-yet?" without expanding anything. */}
+            {scanDebug && (
+              <div
+                className="bg-[#141720] border border-zinc-800 rounded-xl"
+                data-testid="scan-debug"
+              >
+                <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800">
+                  <div className="text-[11px] font-mono text-zinc-300">
+                    <span className="text-[#00e676]" data-testid="scan-passed">{scanDebug.passed} passed</span>
+                    <span className="text-zinc-600 mx-1">/</span>
+                    <span className="text-[#ff8a80]" data-testid="scan-rejected">{scanDebug.rejected} rejected</span>
+                    {scanDebug.topReason && (
+                      <span className="ml-2 text-zinc-500">
+                        · top reason: <span className="text-zinc-300">{GATE_LABELS[scanDebug.topReason]}</span>
+                      </span>
+                    )}
+                    <span className="ml-2 text-zinc-600">· {scanDebug.totalTicks} ticks</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowRejected((v) => !v)}
+                    data-testid="button-toggle-rejected"
+                    className="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  >
+                    {showRejected ? "Hide rejected" : "Show rejected"}
+                  </button>
+                </div>
+                {showRejected && (
+                  <div className="px-4 py-3 space-y-3" data-testid="rejected-candidates">
+                    {(["mtf", "rsi", "bollinger", "score", "cooldown", "open_position"] as const).map((reason) => {
+                      const items = scanDebug.candidates.filter((c) => c.gateFailed === reason);
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={reason}>
+                          <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">
+                            {GATE_LABELS[reason]} <span className="text-zinc-600">({items.length})</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {items.slice(0, 20).map((c) => (
+                              <span
+                                key={c.ticker}
+                                title={`score=${c.score ?? "—"} · mtfBars=${c.mtfBars} · price=$${c.price.toFixed(2)}`}
+                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0d0f12] border border-zinc-700 text-zinc-300"
+                              >
+                                {c.ticker}
+                                {c.score !== null && <span className="text-zinc-600 ml-1">{c.score}</span>}
+                              </span>
+                            ))}
+                            {items.length > 20 && (
+                              <span className="text-[10px] font-mono text-zinc-600 self-center">
+                                +{items.length - 20} more
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+
             {signals.length > 0 ? (
               <div className="bg-[#141720] border border-zinc-800 rounded-xl overflow-hidden">
                 <div className="px-4 py-2 border-b border-zinc-800">

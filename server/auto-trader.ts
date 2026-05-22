@@ -1595,6 +1595,115 @@ export function stopAutoTrader() {
   log("⏹ V19 STOPPED");
 }
 
+// ─── Task #69: Scanner debug — why is nothing trading? ──────────────────────
+//
+// Mirrors the gate logic in scanForBreakouts() (mtf → rsi → bollinger →
+// score) plus enterTrade()'s cooldown check, but read-only: no price
+// advancement, no MTF mutation, no log spam. Used by GET
+// /api/auto-trader/scan-debug so the operator can answer "is the bot
+// gated by warm-up, by markets being flat, or actually trading?" without
+// reading server logs.
+export type ScanDebugGate =
+  | "mtf"
+  | "rsi"
+  | "bollinger"
+  | "score"
+  | "cooldown"
+  | "open_position"
+  | null;
+
+export interface ScanDebugCandidate {
+  ticker: string;
+  score: number | null;
+  gateFailed: ScanDebugGate;
+  mtfBars: number;
+  price: number;
+}
+
+export interface ScanDebugSnapshot {
+  passed: number;
+  rejected: number;
+  topReason: ScanDebugGate;
+  totalTicks: number;
+  candidates: ScanDebugCandidate[];
+}
+
+export function getScanDebug(): ScanDebugSnapshot {
+  const all = getStockData();
+  const openTickers = new Set(state.openPositions.map(p => p.ticker));
+  const candidates: ScanDebugCandidate[] = [];
+  const reasonCount = new Map<Exclude<ScanDebugGate, null>, number>();
+  let passed = 0;
+
+  for (const s of all) {
+    const mt = (s as any).marketType ?? "stock";
+    const isAlt = mt === "crypto" || mt === "forex" || mt === "commodity" || mt === "index";
+    const mtfHist = _mtf.get(s.ticker) ?? [];
+    const g = _prices.get(s.ticker);
+    const price = g ? g.price : s.price;
+
+    let gateFailed: ScanDebugGate = null;
+    let score: number | null = null;
+
+    if (openTickers.has(s.ticker)) {
+      // Scanner still ranks open positions, but they can't be re-entered.
+      // Surface that so an operator doesn't wonder why an A+ candidate
+      // never converts to a new entry.
+      gateFailed = "open_position";
+    } else if (!isTrendingUp(s.ticker)) {
+      gateFailed = "mtf";
+    } else if (s.rsi < 35 || s.rsi > 88) {
+      gateFailed = "rsi";
+    } else if (!isAlt && s.bollingerPosition < 15) {
+      gateFailed = "bollinger";
+    } else {
+      score = computeCompositeScore(s, mt);
+      if (score === null || score < 20) {
+        gateFailed = "score";
+      } else {
+        // Cooldown reporting deviates intentionally from enterTrade()'s
+        // `cooldowns.get(t) ?? 0` formula: that formula mislabels every
+        // ticker as cooldown-gated for the first COOLDOWN ticks after
+        // boot/reset, which is exactly the "why is nothing trading?"
+        // confusion this endpoint exists to clear up. We only report
+        // cooldown for tickers that have actually exited a prior trade.
+        const lastExit = cooldowns.get(s.ticker);
+        if (lastExit !== undefined && state.totalTicks - lastExit < COOLDOWN) {
+          gateFailed = "cooldown";
+        }
+      }
+    }
+
+    if (gateFailed === null) {
+      passed++;
+    } else {
+      reasonCount.set(gateFailed, (reasonCount.get(gateFailed) ?? 0) + 1);
+    }
+
+    candidates.push({
+      ticker: s.ticker,
+      score: score === null ? null : Math.round(score),
+      gateFailed,
+      mtfBars: mtfHist.length,
+      price,
+    });
+  }
+
+  let topReason: ScanDebugGate = null;
+  let topN = 0;
+  for (const [r, n] of reasonCount) {
+    if (n > topN) { topN = n; topReason = r; }
+  }
+
+  return {
+    passed,
+    rejected: candidates.length - passed,
+    topReason,
+    totalTicks: state.totalTicks,
+    candidates,
+  };
+}
+
 export function resetCircuitBreaker(opts?: { manual?: boolean }) {
   state.circuitBreakerActive = false;
   const p = storage.getPortfolio();
