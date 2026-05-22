@@ -276,14 +276,21 @@ export const gridBots = sqliteTable("grid_bots", {
   totalInvestment: real("total_investment").notNull(),
   profitPerGrid: real("profit_per_grid").notNull(), // theoretical % profit per grid step
   stopBufferPct: real("stop_buffer_pct").notNull().default(0.05), // range-exit stop buffer (e.g. 0.05 = 5%)
-  // Task #50 — ATR-based spacing (snapshot at creation; gridCount is derived
-  // when spacingMode === "atr" and remains stable for the bot's lifetime so
-  // level indices stay aligned with open positions on subsequent ticks).
+  // Task #50 — ATR-based spacing. computeBotLevels() re-derives the step from
+  // live rolling ATR every call (clamped to [stepMinPct, stepMaxPct]). The
+  // grid resizes only when there are no open buys, so level indices stay
+  // aligned with mid-cycle positions.
   spacingMode: text("spacing_mode").notNull().default("fixed"), // "fixed" | "atr"
   atrWindow: integer("atr_window").notNull().default(14),
   atrMultiplier: real("atr_multiplier").notNull().default(1.0),
   stepMinPct: real("step_min_pct").notNull().default(0.005), // clamp: min step as % of price
   stepMaxPct: real("step_max_pct").notNull().default(0.05),  // clamp: max step as % of price
+  // Task #56 — Auto-regrid on volatility drift (opt-in). When > 0, the bot
+  // flattens open buys and rebuilds its levels whenever the live ATR has
+  // drifted more than this fraction (e.g. 0.30 = 30%) from atrSnapshot.
+  // 0 = OFF (existing bots default to OFF so behavior is unchanged).
+  autoRegridDriftPct: real("auto_regrid_drift_pct").notNull().default(0),
+  atrSnapshot: real("atr_snapshot").notNull().default(0), // the ATR value at last (re)grid; baseline for drift
   createdAt: text("created_at").notNull(),
   stoppedAt: text("stopped_at"),
   realizedPnl: real("realized_pnl").notNull().default(0),
@@ -300,6 +307,22 @@ export const insertGridBotSchema = createInsertSchema(gridBots).omit({
 });
 export type InsertGridBot = z.infer<typeof insertGridBotSchema>;
 export type GridBot = typeof gridBots.$inferSelect;
+
+// Task #56 — Audit log for adaptive grid lifecycle events (auto-regrids).
+export const gridEvents = sqliteTable("grid_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  botId: integer("bot_id").notNull(),
+  kind: text("kind").notNull(), // "regrid"
+  oldStep: real("old_step").notNull(),
+  newStep: real("new_step").notNull(),
+  oldAtr: real("old_atr").notNull(),
+  newAtr: real("new_atr").notNull(),
+  oldGridCount: integer("old_grid_count").notNull(),
+  newGridCount: integer("new_grid_count").notNull(),
+  flattenedPositions: integer("flattened_positions").notNull().default(0),
+  timestamp: text("timestamp").notNull(),
+});
+export type GridEvent = typeof gridEvents.$inferSelect;
 
 export const gridOrders = sqliteTable("grid_orders", {
   id: integer("id").primaryKey({ autoIncrement: true }),
