@@ -176,28 +176,83 @@ test("breaker resets when portfolio recovers above its tier limit", () => {
 });
 
 // ── autoTraderTick: no new positions while breaker active ────────────────────
-test("autoTraderTick enters no new positions while breaker is active", () => {
+//
+// Task #62 — This test must first PROVE that under the controlled conditions
+// at least one autoTraderTick() call would have produced an entry with the
+// breaker INACTIVE, then trip the breaker and prove that the same conditions
+// yield no entries. Without the control phase, the "no entry while active"
+// assertion could pass simply because the seeded scanner produced no signal
+// for unrelated reasons — masking a real regression in the entry gate.
+test("autoTraderTick enters no new positions while breaker is active (control: would have entered)", () => {
   seedDailyStart(1000);
 
-  // Trip the breaker.
-  storage.getPortfolio = () => fakePortfolio(800); // 20% dd
+  // Keep cash plentiful so an entry isn't blocked by the cash check.
+  storage.getPortfolio = () => fakePortfolio(1000);
+
+  const startState = getAutoTraderState();
+  assert.equal(startState.openPositions.length, 0, "precondition: no open positions");
+
+  // ── Phase A (control): breaker INACTIVE — at least one entry MUST fire.
+  //
+  // The default-seeded scanner needs ~25 ticks of price/MTF history before
+  // the freshness + cooldown gates align with a passing composite signal
+  // (verified empirically: first entry around tick 25 with these seeds).
+  // We give it a generous 60-tick budget and require at least one entry.
+  // If this assertion fails, the gated-path assertion below would be
+  // meaningless — the engine wasn't going to enter anyway.
+  let controlEntries = 0;
+  for (let i = 0; i < 60; i++) {
+    assert.equal(isCircuitBreakerActive(), false, `control tick ${i}: breaker must stay inactive`);
+    const r = autoTraderTick();
+    if (r.entered) controlEntries++;
+  }
+  assert.ok(
+    controlEntries > 0,
+    "control: at least one entry MUST fire with breaker INACTIVE — otherwise the no-entry-while-active assertion proves nothing",
+  );
+  const openAfterControl = getAutoTraderState().openPositions.length;
+  assert.ok(
+    openAfterControl > 0,
+    "control: state.openPositions must reflect at least one filled entry",
+  );
+
+  // ── Phase B: trip the breaker, then re-run ticks under the SAME conditions.
+  //
+  // The portfolio drops to $800 vs the $1000 dailyStart baseline — a 20%
+  // drawdown, well above the tier-1 3% limit. checkCircuitBreaker() runs
+  // at the top of every autoTraderTick() and will keep the breaker active
+  // as long as totalValue stays at $800.
+  storage.getPortfolio = () => fakePortfolio(800);
   evaluateCircuitBreaker();
   assert.equal(isCircuitBreakerActive(), true, "precondition: breaker tripped");
 
-  const before = getAutoTraderState();
-  assert.equal(before.openPositions.length, 0, "precondition: no open positions");
+  const openBeforeGated = getAutoTraderState().openPositions.length;
 
-  // Drive several full ticks. Because state.circuitBreakerActive gates
-  // enterTrade() and the entry block in autoTraderTick(), scanForBreakouts
-  // may still run but must not yield any new positions.
-  for (let i = 0; i < 5; i++) {
+  // Drive several full ticks. scanForBreakouts may still run, but the
+  // `!state.circuitBreakerActive` guards around the entry loop in
+  // autoTraderTick() and at the top of enterTrade() / fillPendingEntry()
+  // must prevent ANY new entry. Pre-existing open positions will be force-
+  // exited by managePositions() (circuit_breaker priority-1 exit), so we
+  // track NEW entries via r.entered and via the openPositions count not
+  // exceeding the count at the start of Phase B.
+  let gatedEntries = 0;
+  let maxOpenSeenInB = openBeforeGated;
+  for (let i = 0; i < 20; i++) {
     const r = autoTraderTick();
-    assert.equal(r.entered, null, `tick ${i}: no entry while breaker active`);
+    if (r.entered) gatedEntries++;
+    maxOpenSeenInB = Math.max(maxOpenSeenInB, getAutoTraderState().openPositions.length);
+    assert.equal(r.entered, null, `gated tick ${i}: no entry while breaker active`);
+    assert.equal(
+      isCircuitBreakerActive(),
+      true,
+      `gated tick ${i}: breaker must remain active while portfolio has not recovered`,
+    );
   }
-
-  const after = getAutoTraderState();
-  assert.equal(after.openPositions.length, 0, "openPositions must stay empty while breaker is active");
-  assert.equal(isCircuitBreakerActive(), true, "breaker must remain active when portfolio has not recovered");
+  assert.equal(gatedEntries, 0, "no new entries may fire while the breaker is active");
+  assert.ok(
+    maxOpenSeenInB <= openBeforeGated,
+    `openPositions must not grow while breaker is active (saw ${maxOpenSeenInB}, started at ${openBeforeGated})`,
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
