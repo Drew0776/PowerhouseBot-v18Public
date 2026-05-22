@@ -772,7 +772,7 @@ let _breakerWatcher: ReturnType<typeof setInterval> | null = null;
  * what trips the breaker-pause, and once it does its own loop is stopped —
  * so nothing in-bot can observe the breaker resetting.
  */
-function watchBreakerResume(): void {
+export function watchBreakerResume(): void {
   // Re-evaluate from the live portfolio before deciding to resume so the
   // breaker's reset condition (portfolio recovered above drawdown limit)
   // is observed independent of the auto-trader loop.

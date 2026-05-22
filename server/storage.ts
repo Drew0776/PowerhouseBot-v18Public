@@ -15,7 +15,7 @@ import Database from "better-sqlite3";
 import { eq, desc } from "drizzle-orm";
 import { generateAllStocks } from "./seed";
 
-export const sqlite = new Database("data.db"); // V17: exported for shared use by grid-engine
+export const sqlite = new Database(process.env.DATA_DB_PATH ?? "data.db"); // V17: exported for shared use by grid-engine
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
