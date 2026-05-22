@@ -8,3 +8,5 @@ vite.config.ts.*
 *.db-shm
 *.db-wal
 # Keep example
+data.db-shm
+data.db-wal
