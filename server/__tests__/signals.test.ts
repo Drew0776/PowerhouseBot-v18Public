@@ -4,7 +4,9 @@
  *   - scores move as prices move (they used to be frozen seeded values);
  *   - every simulated instrument has its own random path (no seed collisions);
  *   - sub-cent instruments keep finite prices and sane stops;
- *   - scores stay within 0–100 without piling up at the cap.
+ *   - scores stay within 0–100 without piling up at the cap;
+ *   - risk per trade comes from the Kelly bounds, and the backtest counts each
+ *     trade once and only rules with enough out-of-sample trades.
  *
  * Run from the project root with:   npx tsx --test server/__tests__/signals.test.ts
  */
@@ -86,4 +88,20 @@ test("signals have stops below entry and scores within 0–100", () => {
 test("grid levels keep sub-cent precision", () => {
   const levels = grid.buildGridLevels(0.0000082, 0.0000122, 4);
   assert.deepEqual(levels, [0.0000082, 0.0000092, 0.0000102, 0.0000112, 0.0000122]);
+});
+
+test("risk per trade stays within the Kelly probe and cap", () => {
+  const sigs = at.scanForBreakouts({ advance: false });
+  for (const s of sigs) assert.ok(s.kellyFraction >= 0.0025 && s.kellyFraction <= 0.08, `${s.ticker} kf ${s.kellyFraction}`);
+});
+
+test("backtest counts each trade once and needs 30 out-of-sample trades to rule", () => {
+  const short = at.runWalkForwardBacktest(400);
+  for (const half of [short.inSample, short.outOfSample]) {
+    assert.equal(half.wins + half.losses, half.trades, "every trade is a win or a loss, T1 partials included");
+  }
+  if (short.outOfSample.trades < 30) {
+    assert.equal(short.verdict, "MARGINAL");
+    assert.match(short.verdictMessage, /at least 30/);
+  }
 });

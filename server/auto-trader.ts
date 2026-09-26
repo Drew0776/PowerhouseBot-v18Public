@@ -40,6 +40,7 @@ import { isRegularSessionOpen } from "./market-calendar";
 import { rsi as rsiOf, ema, macd, bollingerPctB, realizedVol, momentumZ } from "./indicators";
 import { roundPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
+import { estimateEdge, meanCI95 } from "./stats";
 
 // ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
 //
@@ -193,7 +194,9 @@ const COOLDOWN       = 2;    // V14: 2-tick cooldown — max frequency target 14
 
 // Risk
 const DAILY_DD_LIMIT = 0.08;  // 8% circuit breaker
-const KELLY_CAP      = 0.08;  // 8% max account risk per trade
+const KELLY_CAP      = 0.08;   // 8% max account risk per trade
+const PROBE_RISK     = 0.0025; // 0.25% risk while there is no measured edge
+const BACKTEST_MIN_TRADES = 30; // out-of-sample trades needed for a verdict
 
 // FINDING 4 FIX: Capital utilization
 // Min 30%, max 40% of available cash per position
@@ -500,9 +503,14 @@ function sizePosition(
              : totalValue >= 150 ? 1.15
              : 1.0;
 
-  // Kelly estimate (simplified — score-based)
-  const winProb = Math.min(0.82, 0.50 + compositeScore * 0.003);
-  const kf = Math.min(winProb * 0.5, KELLY_CAP);
+  // Risk per trade from the Kelly criterion, f* = p − (1 − p)/b, with p and b
+  // estimated from this engine's own closed trades (shrunk toward p = ½,
+  // b = 1 while the record is short). Half-Kelly, capped at KELLY_CAP. With
+  // no measured edge (f* ≤ 0) it keeps trading at a small probe risk so it
+  // can still gather evidence. (This used to treat the ranking score as a win
+  // probability, which it isn't.)
+  const edge = estimateEdge({ wins, losses, totalWin: totalWinAmt, totalLoss: totalLossAmt });
+  const kf = Math.max(PROBE_RISK, Math.min(edge.kelly / 2, KELLY_CAP));
 
   // V9 AUDIT FIX: 30-40% of cash per position
   // Ensures 5 positions deploy 150-200% → full capital utilization
@@ -1276,6 +1284,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   interface SimPos {
     ticker: string; mt: string; entry: number; stop: number; tp1: number; tp2: number;
     shares: number; sharesRem: number; atr: number; tier1Hit: boolean; ticks: number; enteredAt: number;
+    t1pnl: number; // P&L already realized by the T1 partial; counted into the trade at close
   }
 
   const positions: SimPos[] = [];
@@ -1283,6 +1292,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   let balAtSplit = STARTING_BALANCE;
   let isW = 0, isL = 0, isWA = 0, isLA = 0, isT = 0, isSl = 0;
   let oosW = 0, oosL = 0, oosWA = 0, oosLA = 0, oosT = 0, oosSl = 0;
+  const oosTradePnls: number[] = [];
 
   for (let tick = 1; tick <= totalTicks; tick++) {
     const inIS = tick <= splitAt;
@@ -1307,8 +1317,8 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
         const sl = slippage(half, pos.tp1, pos.mt);
         const pnl = (pos.tp1 - pos.entry) * half - sl;
         bal += pnl;
-        const tradeIS = pos.enteredAt <= splitAt;
-        if (tradeIS) { isWA += pnl; isSl += sl; } else { oosWA += pnl; oosSl += sl; }
+        if (pos.enteredAt <= splitAt) isSl += sl; else oosSl += sl;
+        pos.t1pnl += pnl;
         pos.sharesRem -= half;
       }
 
@@ -1320,13 +1330,15 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
         const sl = slippage(pos.sharesRem, cur, pos.mt);
         const pnl = (cur - pos.entry) * pos.sharesRem - sl;
         bal += pnl;
-        const tradeIS = pos.enteredAt <= splitAt;
-        if (tradeIS) {
+        // One result per trade: final exit plus any T1 partial.
+        const tradePnl = pnl + pos.t1pnl;
+        if (pos.enteredAt <= splitAt) {
           isT++; isSl += sl;
-          if (pnl >= 0) { isW++; isWA += pnl; } else { isL++; isLA += Math.abs(pnl); }
+          if (tradePnl >= 0) { isW++; isWA += tradePnl; } else { isL++; isLA += Math.abs(tradePnl); }
         } else {
           oosT++; oosSl += sl;
-          if (pnl >= 0) { oosW++; oosWA += pnl; } else { oosL++; oosLA += Math.abs(pnl); }
+          oosTradePnls.push(tradePnl);
+          if (tradePnl >= 0) { oosW++; oosWA += tradePnl; } else { oosL++; oosLA += Math.abs(tradePnl); }
         }
         lCooldowns.set(pos.ticker, tick);
         positions.splice(pi, 1);
@@ -1389,7 +1401,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
         tp1: cand.tp1 + (adjEntry - cand.price),
         tp2: cand.tp2 + (adjEntry - cand.price),
         shares, sharesRem: shares, atr: cand.atr,
-        tier1Hit: false, ticks: 0, enteredAt: tick,
+        tier1Hit: false, ticks: 0, enteredAt: tick, t1pnl: 0,
       });
     }
   }
@@ -1411,29 +1423,33 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   const isR  = mk(splitAt, isT,  isW,  isL,  isWA,  isLA,  isSl,  STARTING_BALANCE, balAtSplit, maxDD_IS);
   const oosR = mk(totalTicks - splitAt, oosT, oosW, oosL, oosWA, oosLA, oosSl, balAtSplit, bal, maxDD_OOS);
 
-  const hasStat = oosT >= 3;
+  // Verdict from a 95% confidence interval on the mean out-of-sample trade
+  // P&L, with at least BACKTEST_MIN_TRADES trades. (It used to rule on
+  // profit-factor thresholds with as few as 3 trades.)
+  const ci = meanCI95(oosTradePnls);
+  const hasStat = ci !== null && ci.n >= BACKTEST_MIN_TRADES;
   const degrad = hasStat && isR.profitFactor > 0 && isR.profitFactor < 99 && oosR.profitFactor < 99
     ? Math.round(((isR.profitFactor - oosR.profitFactor) / isR.profitFactor) * 10000) / 100 : 0;
+  const usd = (v: number) => (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(2);
 
   let verdict: "PASS" | "FAIL" | "MARGINAL";
   let msg: string, rec: string;
-
-  if (!hasStat && isR.profitFactor >= 2.0) {
+  if (!hasStat) {
     verdict = "MARGINAL";
-    msg = `IS STRONG (PF=${isR.profitFactor}, WR=${isR.winRate}%) — OOS only ${oosT} trades. Run 2K+ ticks.`;
-    rec = "In-sample validated. Run 2K test or go to Alpaca paper trading.";
-  } else if (oosR.profitFactor >= 1.5 && oosR.winRate >= 48 && degrad < 40) {
+    msg = `Only ${oosT} out-of-sample trades; at least ${BACKTEST_MIN_TRADES} are needed before the result means anything.`;
+    rec = "Run a longer backtest (2K–5K ticks).";
+  } else if (ci!.lo > 0) {
     verdict = "PASS";
-    msg = `ROBUST — OOS PF=${oosR.profitFactor}, WR=${oosR.winRate}%, Degradation ${degrad}%.`;
-    rec = "Strategy validated on unseen data. Proceed to Alpaca paper trading.";
-  } else if (oosR.profitFactor >= 1.2) {
-    verdict = "MARGINAL";
-    msg = `MARGINAL — OOS PF=${oosR.profitFactor}. Run 2K+ ticks for full coverage.`;
-    rec = "Use 50% position sizing for first 30 days.";
+    msg = `Mean out-of-sample trade ${usd(ci!.mean)} (95% CI ${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) is above zero.`;
+    rec = "Edge measured on unseen simulated prices. Confirm it on live paper data before relying on it.";
+  } else if (ci!.hi < 0) {
+    verdict = "FAIL";
+    msg = `Mean out-of-sample trade ${usd(ci!.mean)} (95% CI ${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) is below zero: it loses money on unseen data.`;
+    rec = "Don't trade this configuration.";
   } else {
-    verdict = hasStat ? "FAIL" : "MARGINAL";
-    msg = hasStat ? `Underperforming OOS (PF=${oosR.profitFactor}). Run 2K+ ticks.` : `Only ${oosT} OOS trades. Run 2K+ ticks for statistical verdict.`;
-    rec = "Run 2K+ ticks to get a valid OOS sample size.";
+    verdict = "MARGINAL";
+    msg = `Mean out-of-sample trade ${usd(ci!.mean)}, but the 95% CI (${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) includes zero: no evidence of an edge either way.`;
+    rec = "Run longer, or change the strategy before trading it.";
   }
 
   return { inSample: isR, outOfSample: oosR, verdict, verdictMessage: msg, degradation: degrad, recommendation: rec };
