@@ -260,3 +260,19 @@ test("day P&L is measured from the value at the start of the ET day", () => {
   const p = storage.getPortfolio();
   assert.equal(p.dayPnl, Math.round((p.totalValue - 480) * 100) / 100);
 });
+
+test("cross-site state-changing requests are refused; same-origin ones pass", () => {
+  const run = (method: string, headers: Record<string, string>) => {
+    let status = 0, passed = false;
+    const req = { method, get: (h: string) => headers[h.toLowerCase()] } as any;
+    const res = { status(c: number) { status = c; return this; }, json() { return this; } } as any;
+    authMod.sameOriginGuard(req, res, () => { passed = true; });
+    return passed ? "next" : status;
+  };
+  assert.equal(run("POST", { host: "bot.example.com", origin: "https://evil.example.net" }), 403);
+  assert.equal(run("POST", { host: "bot.example.com", origin: "https://bot.example.com" }), "next");
+  assert.equal(run("POST", { host: "internal:5000", "x-forwarded-host": "bot.example.com", origin: "https://bot.example.com" }), "next");
+  assert.equal(run("POST", { host: "bot.example.com" }), "next", "no Origin: left to the session check");
+  assert.equal(run("GET", { host: "bot.example.com", origin: "https://evil.example.net" }), "next", "safe methods pass");
+  assert.equal(run("POST", { host: "bot.example.com", origin: "null" }), 403, "opaque origins are refused");
+});

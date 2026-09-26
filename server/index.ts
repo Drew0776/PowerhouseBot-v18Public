@@ -2,7 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
-import { setupAuth } from "./auth";
+import { setupAuth, sameOriginGuard, securityHeaders } from "./auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,6 +22,8 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+app.use(securityHeaders);
+app.use("/api", sameOriginGuard);
 setupAuth(app);
 
 export function log(message: string, source = "express") {

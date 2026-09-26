@@ -65,6 +65,38 @@ export function setupAuth(app: Express): void {
   app.use(passport.session());
 }
 
+// ── Cross-site request guard ────────────────────────────────────────────────
+// Defence in depth on top of the SameSite=Lax session cookie: a state-changing
+// API request whose Origin names a different host is refused. Browsers send
+// Origin on every cross-origin POST, so a page on another site (or a sibling
+// subdomain, which SameSite treats as same-site) can't drive the bot. Requests
+// without an Origin header (curl, server-to-server) are left to the session
+// check. The proxy's X-Forwarded-Host is accepted alongside Host.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+export function sameOriginGuard(req: Request, res: Response, next: NextFunction): void {
+  if (SAFE_METHODS.has(req.method)) return next();
+  const origin = req.get("origin");
+  if (!origin) return next();
+  let originHost: string;
+  try { originHost = new URL(origin).host; } catch { res.status(403).json({ message: "Cross-site request refused" }); return; }
+  const hosts = [req.get("host"), ...(req.get("x-forwarded-host") ?? "").split(",").map((h) => h.trim())].filter(Boolean);
+  if (hosts.includes(originHost)) return next();
+  res.status(403).json({ message: "Cross-site request refused" });
+}
+
+// ── Security headers ─────────────────────────────────────────────────────────
+// Framing is only blocked in production: Replit's dev preview shows the app
+// inside an iframe.
+export function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  if (process.env.NODE_ENV === "production") {
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+  }
+  next();
+}
+
 // ── Auth middleware ──────────────────────────────────────────────────────────
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (req.isAuthenticated()) return next();
