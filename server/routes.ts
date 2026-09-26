@@ -613,17 +613,24 @@ export async function registerRoutes(
   });
 
   // POST /api/auto-trader/backtest — V6 walk-forward backtest
-  app.post("/api/auto-trader/backtest", requireAuth, (req, res) => {
+  // One backtest at a time: each is CPU-heavy, and the server stays
+  // responsive only because a single run yields between chunks.
+  let backtestRunning = false;
+  app.post("/api/auto-trader/backtest", requireAuth, async (req, res) => {
+    if (backtestRunning) return res.status(409).json({ message: "A backtest is already running" });
+    backtestRunning = true;
     try {
       const raw = req.body?.ticks;
       const ticks = typeof raw === "number" && Number.isFinite(raw)
         ? Math.max(10, Math.min(5000, Math.floor(raw)))
         : 1000;
-      const result = runWalkForwardBacktest(ticks);
+      const result = await runWalkForwardBacktest(ticks);
       res.json(result);
     } catch (err) {
       console.error("[/api/auto-trader/backtest] error:", err);
       res.status(500).json({ message: "Backtest failed" });
+    } finally {
+      backtestRunning = false;
     }
   });
 

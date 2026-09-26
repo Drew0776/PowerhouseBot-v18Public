@@ -1267,7 +1267,7 @@ export interface BacktestResult {
  * time or a live feed: the daily-loss breaker, market hours and limit-order
  * repricing (simulated entries always fill on the tick they are placed).
  */
-export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
+export async function runWalkForwardBacktest(totalTicks = 1000): Promise<BacktestResult> {
   const splitAt = Math.floor(totalTicks * 0.8);
   const all = getStockData();
   const mtOf = (s: StockData) => (s as any).marketType ?? "stock";
@@ -1327,6 +1327,10 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   }
 
   for (let tick = 1; tick <= totalTicks; tick++) {
+    // Yield to the event loop every 10 ticks (~10 ms of work): a 5,000-tick
+    // run takes several seconds, and it used to freeze every request and bot
+    // loop meanwhile.
+    if (tick % 10 === 0) await new Promise(resolve => setImmediate(resolve));
     // Same periodic re-anchoring of the price bounds as the live tick.
     if (tick % 400 === 0) for (const [t, g] of lPrices) lSeeds.set(t, g.price);
     for (const s of all) sampleHistory(lMTF, s.ticker, lAdvance(s.ticker, mtOf(s)));
