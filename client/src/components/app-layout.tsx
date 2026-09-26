@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { STARTING_BALANCE } from "@shared/constants";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -123,7 +124,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="px-4 py-3 border-t border-border">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Zap className="w-3 h-3 text-[#00e676]" />
-          <span>Paper Trading — $100</span>
+          <span>Paper Trading — ${STARTING_BALANCE}</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
           <Activity className="w-3 h-3" />
@@ -175,7 +176,7 @@ function MobileDrawerFooter() {
     <div className="px-4 py-4 border-t border-zinc-800">
       <div className="flex items-center gap-2 text-xs text-zinc-500 mb-1">
         <Zap className="w-3 h-3 text-[#00e676]" />
-        <span>Paper Trading — $100 starting capital</span>
+        <span>Paper Trading — ${STARTING_BALANCE} starting capital</span>
       </div>
       <div className="flex items-center gap-2 text-xs text-zinc-500">
         <TrendingUp className="w-3 h-3 text-[#00bcd4]" />

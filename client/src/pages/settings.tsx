@@ -61,7 +61,7 @@ export default function Settings() {
 
   const testTelegram = async () => {
     try {
-      const r = await fetch("/api/telegram/test");
+      const r = await fetch("/api/telegram/test", { method: "POST", credentials: "same-origin" });
       const d = await r.json() as { connected: boolean; message: string };
       if (d.connected) {
         toast({ title: "Telegram Connected", description: d.message });

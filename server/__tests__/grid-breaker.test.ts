@@ -6,7 +6,8 @@
  *      the bot transitions to `paused_by_breaker`, its open buys are flattened
  *      at market, and subsequent ticks place no further fills.
  *   2. Portfolio recovery + `watchBreakerResume()` transitions paused bots back
- *      to `active` and ticking resumes.
+ *      to `active` and ticking resumes — while the auto-trader's own breaker
+ *      stays latched until a manual reset.
  *   3. Restart-survival: after dropping all in-memory engine state, calling
  *      `bootGridEngine()` rebuilds the same level indices, open-buy map, and
  *      realized P&L — no duplicate fills.
@@ -43,8 +44,9 @@ const {
   bootGridEngine,
   watchBreakerResume,
   computeBotLevels,
+  shutdownGridEngine,
 } = gridEngineMod;
-const { resetAutoTraderState } = autoTraderMod;
+const { resetAutoTraderState, isCircuitBreakerActive } = autoTraderMod;
 
 const ORIG_getPortfolio = storage.getPortfolio.bind(storage);
 
@@ -87,6 +89,7 @@ beforeEach(() => {
 });
 
 after(() => {
+  shutdownGridEngine(); // clear the breaker watcher / bot loops so the process can exit
   storage.getPortfolio = ORIG_getPortfolio;
   try { sqlite.close(); } catch { /* noop */ }
   for (const ext of ["", "-wal", "-shm"]) {
@@ -195,6 +198,11 @@ test("watchBreakerResume re-activates parked bots once portfolio recovers", () =
 
   const resumed = getGridBot(bot.id)!;
   assert.equal(resumed.status, "active", "bot resumed after breaker recovery");
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "the auto-trader's breaker stays latched — only grid bots auto-resume",
+  );
 
   // After resumption, ticks must once again be able to record fills.
   stopGridBotLoop(bot.id); // ignore the loop watchBreakerResume started
@@ -202,6 +210,11 @@ test("watchBreakerResume re-activates parked bots once portfolio recovers", () =
   for (let i = 0; i < 25; i++) tickGridBot(bot.id);
   const after = getGridOrders(bot.id).length;
   assert.ok(after >= before, "ticking resumes after breaker clears (no regression)");
+  assert.equal(
+    getGridBot(bot.id)!.status,
+    "active",
+    "a resumed bot must keep trading while the auto-trader's breaker is still latched, not be re-parked",
+  );
 });
 
 test("restart-survival: bootGridEngine replays SQLite state without duplicate fills", () => {

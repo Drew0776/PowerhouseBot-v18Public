@@ -1,6 +1,6 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
-import { storage, getStockData, getStockByTicker } from "./storage";
+import { storage, sqlite, getStockData, getStockByTicker, getGridPrice, STARTING_BALANCE } from "./storage";
 import { requireAuth, passport } from "./auth";
 import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow, generateMarketStatus } from "./seed";
 import {
@@ -20,6 +20,8 @@ import {
   stopGridBotLoop,
   getGridEvents,
   watchBreakerResume,
+  isGridReserveTrade,
+  stopAllGridBotsForReset,
 } from "./grid-engine";
 import {
   autoTraderTick,
@@ -75,17 +77,40 @@ export async function registerRoutes(
 
   // ── Auth routes (public) ──────────────────────────────────────────────────
 
-  // GET /api/auth/check — Task #67: auth bypassed, always authenticated.
-  // (Login/logout routes below remain functional but unused by the UI.)
-  app.get("/api/auth/check", (_req, res) => {
-    res.json({ authenticated: true });
+  // GET /api/auth/check — reports whether this session is logged in.
+  app.get("/api/auth/check", (req, res) => {
+    res.json({ authenticated: req.isAuthenticated() });
+  });
+
+  // GET /api/health — unauthenticated liveness probe for container healthchecks.
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true });
   });
 
   // POST /api/auth/login — { password }
+  // Throttled per client IP: 10 failed attempts per 15 minutes.
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  const LOGIN_MAX_FAILURES = 10;
+  const loginFailures = new Map<string, { count: number; resetAt: number }>();
   app.post("/api/auth/login", (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip ?? "unknown";
+    const now = Date.now();
+    const entry = loginFailures.get(ip);
+    if (entry && entry.resetAt <= now) loginFailures.delete(ip);
+    const current = loginFailures.get(ip);
+    if (current && current.count >= LOGIN_MAX_FAILURES) {
+      res.setHeader("Retry-After", String(Math.ceil((current.resetAt - now) / 1000)));
+      return res.status(429).json({ message: "Too many failed attempts. Try again later." });
+    }
     passport.authenticate("local", (err: unknown, user: Express.User | false) => {
       if (err) return next(err);
-      if (!user) return res.status(401).json({ message: "Invalid password" });
+      if (!user) {
+        const f = loginFailures.get(ip) ?? { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+        f.count++;
+        loginFailures.set(ip, f);
+        return res.status(401).json({ message: "Invalid password" });
+      }
+      loginFailures.delete(ip);
       req.logIn(user, (loginErr) => {
         if (loginErr) return next(loginErr);
         res.json({ authenticated: true });
@@ -102,6 +127,9 @@ export async function registerRoutes(
   });
 
   // ── Protected routes ──────────────────────────────────────────────────────
+  // Everything else under /api requires an operator session. Registered here,
+  // after the public routes above, so it can't be forgotten on a new route.
+  app.use("/api", requireAuth);
 
   // GET /api/portfolio — current portfolio value, P&L, positions
   app.get("/api/portfolio", requireAuth, (_req, res) => {
@@ -309,8 +337,9 @@ export async function registerRoutes(
     }
   });
 
-  // GET /api/telegram/test — test Telegram connection
-  app.get("/api/telegram/test", requireAuth, async (_req, res) => {
+  // POST /api/telegram/test — send a test Telegram alert. POST (not GET) so a
+  // cross-site <img> or link can't trigger a send.
+  app.post("/api/telegram/test", requireAuth, async (_req, res) => {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chatId) {
@@ -320,10 +349,30 @@ export async function registerRoutes(
     res.json({ connected: true, message: "Test alert sent to your Telegram!" });
   });
 
-  // POST /api/settings
+  // POST /api/settings — only known keys, with the right types and ranges.
+  const pct = z.number().finite().min(0).max(100);
+  const settingsSchema = z.object({
+    maxPositionPct: pct,
+    stopLossPct: pct,
+    takeProfitPct: z.number().finite().min(0).max(1000),
+    scannerPennyActive: z.boolean(),
+    scannerMomentumActive: z.boolean(),
+    scannerSqueezeActive: z.boolean(),
+    scannerOptionsActive: z.boolean(),
+    minScoreThreshold: pct,
+    alertsEnabled: z.boolean(),
+    alertBuySignals: z.boolean(),
+    alertSellSignals: z.boolean(),
+    alertPriceAlerts: z.boolean(),
+  }).partial().strict();
+
   app.post("/api/settings", requireAuth, (req, res) => {
     try {
-      const s = storage.saveSettings(req.body);
+      const parsed = settingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid settings", errors: parsed.error.errors });
+      }
+      const s = storage.saveSettings(parsed.data);
       res.json(s);
     } catch (err) {
       res.status(500).json({ message: "Failed to save settings" });
@@ -440,6 +489,9 @@ export async function registerRoutes(
       if (!trade) {
         return res.status(404).json({ message: "Trade not found" });
       }
+      if (isGridReserveTrade(id)) {
+        return res.status(409).json({ message: "This trade holds a grid bot's capital. Stop the grid bot instead." });
+      }
 
       const stock = getStockByTicker(trade.ticker);
       if (!stock) {
@@ -534,7 +586,7 @@ export async function registerRoutes(
   // GET /api/auto-trader/scan — scan without trading (preview)
   app.get("/api/auto-trader/scan", requireAuth, (_req, res) => {
     try {
-      const signals = scanForBreakouts();
+      const signals = scanForBreakouts({ advance: false }); // preview: no price moves
       res.json(signals);
     } catch (err) {
       res.status(500).json({ message: "Failed to scan" });
@@ -555,7 +607,10 @@ export async function registerRoutes(
   // POST /api/auto-trader/backtest — V6 walk-forward backtest
   app.post("/api/auto-trader/backtest", requireAuth, (req, res) => {
     try {
-      const ticks = typeof req.body?.ticks === "number" ? Math.min(req.body.ticks, 5000) : 1000;
+      const raw = req.body?.ticks;
+      const ticks = typeof raw === "number" && Number.isFinite(raw)
+        ? Math.max(10, Math.min(5000, Math.floor(raw)))
+        : 1000;
       const result = runWalkForwardBacktest(ticks);
       res.json(result);
     } catch (err) {
@@ -570,13 +625,14 @@ export async function registerRoutes(
       // Delete all trades and equity curve entries
       const { db } = await import("./storage");
       const { trades, equityCurve } = await import("../shared/schema");
+      stopAllGridBotsForReset();
       db.delete(trades).run();
       db.delete(equityCurve).run();
       // Seed fresh equity point
-      storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: 100 });
+      storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: STARTING_BALANCE });
       stopAutoTrader();
       resetAutoTraderState();
-      res.json({ message: "Portfolio reset to $100. All trades cleared.", cash: 100 });
+      res.json({ message: `Portfolio reset to $${STARTING_BALANCE}. All trades cleared.`, cash: STARTING_BALANCE });
     } catch (err) {
       console.error("[/api/portfolio/reset] error:", err);
       res.status(500).json({ message: "Reset failed" });
@@ -673,24 +729,28 @@ export async function registerRoutes(
         return res.status(400).json({ message: `Insufficient cash. Available: $${portfolio.cash.toFixed(2)}` });
       }
 
-      // Reserve the investment from portfolio (create a holding trade)
-      const reserveShares = totalInvestment / stock.price;
-      storage.createTrade({
-        ticker: ticker.toUpperCase(),
-        action: "buy",
-        shares: reserveShares,
-        price: stock.price,
-        total: totalInvestment,
-        stopLoss: null,
-        takeProfit: null,
-        openedAt: new Date().toISOString(),
-      });
-
-      const bot = createGridBot({
-        ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
-        spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
-        autoRegridDriftPct,
-      });
+      // Reserve the investment from portfolio cash with a holding trade that
+      // is linked to the bot (valued from grid P&L, settled when it stops).
+      // Both writes go in one transaction so a failed create can't strand cash.
+      const gridPrice = getGridPrice(ticker.toUpperCase()) || stock.price;
+      const bot = sqlite.transaction(() => {
+        const reserve = storage.createTrade({
+          ticker: ticker.toUpperCase(),
+          action: "buy",
+          shares: totalInvestment / gridPrice,
+          price: gridPrice,
+          total: totalInvestment,
+          stopLoss: null,
+          takeProfit: null,
+          openedAt: new Date().toISOString(),
+        });
+        return createGridBot({
+          ticker, lowerPrice, upperPrice, gridCount, totalInvestment, stopBufferPct,
+          spacingMode, atrWindow, atrMultiplier, stepMinPct, stepMaxPct,
+          autoRegridDriftPct,
+          reserveTradeId: reserve.id,
+        });
+      })();
       res.json(bot);
     } catch (err) {
       res.status(500).json({ message: "Failed to create grid bot" });
@@ -756,8 +816,18 @@ export async function registerRoutes(
   app.post("/api/grid/bots/:id/toggle", requireAuth, (req, res) => {
     try {
       const id = parseInt(String(req.params.id));
-      const { status } = req.body as { status: "active" | "paused" };
+      const { status } = (req.body ?? {}) as { status?: unknown };
       if (isNaN(id)) return res.status(400).json({ message: "Invalid bot ID" });
+      if (status !== "active" && status !== "paused") {
+        return res.status(400).json({ message: "status must be 'active' or 'paused'" });
+      }
+      const current = getGridBot(id);
+      if (!current) return res.status(404).json({ message: "Bot not found" });
+      // Only active ↔ paused. Stopped bots have already returned their capital,
+      // and paused_by_breaker bots resume only when the breaker clears.
+      if (current.status !== "active" && current.status !== "paused") {
+        return res.status(409).json({ message: `Bot is ${current.status} and can't be toggled.` });
+      }
       const bot = toggleGridBot(id, status);
       if (!bot) return res.status(404).json({ message: "Bot not found" });
       if (status === "paused") {

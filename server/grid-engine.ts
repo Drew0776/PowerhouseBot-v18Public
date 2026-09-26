@@ -14,8 +14,8 @@ import { eq, desc } from "drizzle-orm";
 import { gridBots, gridOrders, gridEvents } from "@shared/schema";
 import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
-import { getStockByTicker, advancePrice, getLivePrice, db as gridDb, sqlite } from "./storage";
-import { evaluateCircuitBreaker } from "./auto-trader";
+import { storage, getStockByTicker, advanceGridPrice, getGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
+import { isGridBreakerActive } from "./auto-trader";
 
 // Create tables if they don't exist (uses shared connection)
 sqlite.exec(`
@@ -79,6 +79,7 @@ try {
   // Task #56 — auto-regrid drift settings + ATR baseline snapshot
   if (!has("auto_regrid_drift_pct")) sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN auto_regrid_drift_pct REAL NOT NULL DEFAULT 0`);
   if (!has("atr_snapshot"))          sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN atr_snapshot REAL NOT NULL DEFAULT 0`);
+  if (!has("reserve_trade_id"))      sqlite.exec(`ALTER TABLE grid_bots ADD COLUMN reserve_trade_id INTEGER`);
 } catch (_e) { /* non-fatal */ }
 
 /** Build equally-spaced grid levels between lower and upper */
@@ -164,7 +165,8 @@ function botHasOpenBuys(botId: number): boolean {
  * level N-1. While there are open buys we keep the current gridCount so level
  * indices remain stable across ticks.
  */
-export function computeBotLevels(bot: GridBot): number[] {
+export function computeBotLevels(bot: GridBot, opts: { persist?: boolean } = {}): number[] {
+  const persist = opts.persist ?? true;
   if (bot.spacingMode !== "atr") {
     return buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
   }
@@ -184,7 +186,7 @@ export function computeBotLevels(bot: GridBot): number[] {
   // Freeze re-spacing while the current grid cycle has open buys so existing
   // (level → price) bindings don't shift under fills that are mid-flight.
   const effectiveCount = botHasOpenBuys(bot.id) ? bot.gridCount : derived;
-  if (effectiveCount !== bot.gridCount) {
+  if (persist && effectiveCount !== bot.gridCount) {
     // Persist so summary, profit-per-grid, and future ticks all agree.
     const newProfitPerGrid = calcProfitPerGrid(bot.lowerPrice, bot.upperPrice, effectiveCount);
     try {
@@ -263,6 +265,7 @@ export function createGridBot(params: {
   stepMinPct?: number;
   stepMaxPct?: number;
   autoRegridDriftPct?: number;
+  reserveTradeId?: number | null;
 }): GridBot {
   const {
     ticker, lowerPrice, upperPrice, totalInvestment, stopBufferPct,
@@ -318,6 +321,7 @@ export function createGridBot(params: {
     stepMaxPct,
     autoRegridDriftPct,
     atrSnapshot,
+    reserveTradeId: params.reserveTradeId ?? null,
     createdAt: new Date().toISOString(),
   }).returning().get();
 
@@ -457,13 +461,80 @@ export function cancelOpenGridOrders(botId: number): void {
   stopGridBotLoop(botId);
 }
 
-/** Stop a grid bot */
+/** Stop a grid bot: flatten open buys, then return its capital to the portfolio. */
 export function stopGridBot(id: number): GridBot | undefined {
   cancelOpenGridOrders(id);
+  const bot = getGridBot(id);
+  if (!bot) return undefined;
+  if (bot.status !== "stopped" && bot.status !== "stopped_range_exit") {
+    closeAllOpenPositions(bot, getGridPrice(bot.ticker));
+    settleReserve(bot);
+  }
   return gridDb.update(gridBots)
-    .set({ status: "stopped", stoppedAt: new Date().toISOString() })
+    .set({ status: "stopped", stoppedAt: bot.stoppedAt ?? new Date().toISOString() })
     .where(eq(gridBots.id, id))
     .returning().get();
+}
+
+/**
+ * Close the bot's reserve trade with its realized grid P&L, so the invested
+ * capital plus profit (or minus loss) goes back into portfolio cash. Call
+ * only after open buys have been flattened.
+ */
+function settleReserve(bot: GridBot): void {
+  if (bot.reserveTradeId == null) return;
+  storage.settleTrade(bot.reserveTradeId, bot.realizedPnl);
+}
+
+/** Open (unmatched) buys, keyed by level. Orders may be in any id order. */
+function openBuysOf(orders: GridOrder[]): Map<number, GridOrder> {
+  const openBuys = new Map<number, GridOrder>();
+  for (const o of [...orders].sort((a, b) => a.id - b.id)) {
+    if (o.action === "buy") openBuys.set(o.level, o);
+    else if (o.action === "sell") openBuys.delete(o.level - 1);
+  }
+  return openBuys;
+}
+
+/** Current value of a bot's reserve: capital + realized + unrealized grid P&L. */
+function reserveValue(bot: GridBot): number {
+  const price = getGridPrice(bot.ticker);
+  let unrealized = 0;
+  for (const buy of openBuysOf(getGridOrders(bot.id)).values()) {
+    unrealized += (price - buy.fillPrice) * buy.shares;
+  }
+  return bot.totalInvestment + bot.realizedPnl + unrealized;
+}
+
+setGridReserveValuer(() => {
+  const values = new Map<number, number>();
+  for (const bot of getAllGridBots()) {
+    if (bot.reserveTradeId == null) continue;
+    if (bot.status === "stopped" || bot.status === "stopped_range_exit") continue;
+    values.set(bot.reserveTradeId, reserveValue(bot));
+  }
+  return values;
+});
+
+/** True if the trade is the capital reserve of a grid bot. */
+export function isGridReserveTrade(tradeId: number): boolean {
+  return getAllGridBots().some(b => b.reserveTradeId === tradeId);
+}
+
+/**
+ * Portfolio reset wipes the trades table, reserve trades included, so every
+ * bot still running would keep trading capital that no longer exists. Park
+ * them all as stopped.
+ */
+export function stopAllGridBotsForReset(): void {
+  for (const bot of getAllGridBots()) {
+    stopGridBotLoop(bot.id);
+    if (bot.status === "stopped" || bot.status === "stopped_range_exit") continue;
+    gridDb.update(gridBots)
+      .set({ status: "stopped", stoppedAt: new Date().toISOString() })
+      .where(eq(gridBots.id, bot.id))
+      .run();
+  }
 }
 
 /** Pause/resume a grid bot */
@@ -551,8 +622,8 @@ export function tickGridBot(botId: number): GridOrder | null {
   // hard-drawdown protection). On trip, every grid bot is flattened at
   // market and parked in `paused_by_breaker`; the boot-time watcher (see
   // bootGridEngine) auto-resumes these bots once drawdown recovers.
-  if (evaluateCircuitBreaker()) {
-    const livePrice = getLivePrice(bot.ticker);
+  if (isGridBreakerActive()) {
+    const livePrice = getGridPrice(bot.ticker);
     const marketPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
     closeAllOpenPositions(bot, marketPrice);
     cancelOpenGridOrders(botId);
@@ -564,7 +635,7 @@ export function tickGridBot(botId: number): GridOrder | null {
   }
 
   // Advance price simulation — GBM + mean-reversion step
-  const currentPrice = advancePrice(bot.ticker);
+  const currentPrice = advanceGridPrice(bot.ticker);
   if (!currentPrice) return null;
 
   // Task #56 — Auto-regrid on volatility drift (no-op unless opted in).
@@ -584,6 +655,7 @@ export function tickGridBot(botId: number): GridOrder | null {
   if (currentPrice < stopLower || currentPrice > stopUpper) {
     closeAllOpenPositions(bot, currentPrice);
     stopGridBotLoop(botId);
+    settleReserve(bot);
     gridDb.update(gridBots)
       .set({ status: "stopped_range_exit", stoppedAt: new Date().toISOString() })
       .where(eq(gridBots.id, botId))
@@ -691,10 +763,11 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
   if (!bot) return null;
 
   // Read-only: do NOT advance prices here (prevents double-tick on summary polling)
-  const livePrice = getLivePrice(bot.ticker);
+  const livePrice = getGridPrice(bot.ticker);
   const currentPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
 
-  const levels = computeBotLevels(bot);
+  // Read-only: a GET for the summary must not persist a resized grid.
+  const levels = computeBotLevels(bot, { persist: false });
   const allOrders = getGridOrders(botId);
 
   // Compute per-level fill info
@@ -776,7 +849,7 @@ export function watchBreakerResume(): void {
   // Re-evaluate from the live portfolio before deciding to resume so the
   // breaker's reset condition (portfolio recovered above drawdown limit)
   // is observed independent of the auto-trader loop.
-  if (evaluateCircuitBreaker()) return;
+  if (isGridBreakerActive()) return;
   const parked = gridDb.select().from(gridBots)
     .where(eq(gridBots.status, "paused_by_breaker")).all();
   for (const bot of parked) {
@@ -793,6 +866,7 @@ export function watchBreakerResume(): void {
  *  - Starts the global breaker-resume watcher.
  */
 export function bootGridEngine(): void {
+  linkLegacyReserves();
   for (const bot of getAllGridBots()) {
     if (bot.status === "active") startGridBotLoop(bot.id);
   }
@@ -800,5 +874,43 @@ export function bootGridEngine(): void {
     _breakerWatcher = setInterval(() => {
       try { watchBreakerResume(); } catch (_e) { /* non-fatal */ }
     }, 5000);
+  }
+}
+
+/** Stop the breaker watcher and every bot loop (tests / graceful shutdown). */
+export function shutdownGridEngine(): void {
+  if (_breakerWatcher) { clearInterval(_breakerWatcher); _breakerWatcher = null; }
+  for (const id of Array.from(_botIntervals.keys())) stopGridBotLoop(id);
+}
+
+/**
+ * Bots created before reserve_trade_id existed have no link to the "buy"
+ * trade that reserved their capital, so they were marked like a stock and
+ * never paid back. Match each to its open reserve trade (same ticker, total
+ * equal to the investment, opened within 5 s before the bot) and link it. For
+ * bots that already stopped, flatten any open grid buys and settle now.
+ */
+function linkLegacyReserves(): void {
+  const bots = getAllGridBots().filter(b => b.reserveTradeId == null);
+  if (bots.length === 0) return;
+  const linked = new Set(getAllGridBots().map(b => b.reserveTradeId).filter((x): x is number => x != null));
+  const open = storage.getOpenTrades();
+  for (const bot of bots) {
+    const created = Date.parse(bot.createdAt);
+    const match = open.find(t =>
+      !linked.has(t.id) &&
+      t.ticker === bot.ticker &&
+      Math.abs(t.total - bot.totalInvestment) < 0.005 &&
+      created - Date.parse(t.openedAt) >= 0 &&
+      created - Date.parse(t.openedAt) <= 5000,
+    );
+    if (!match) continue;
+    linked.add(match.id);
+    gridDb.update(gridBots).set({ reserveTradeId: match.id }).where(eq(gridBots.id, bot.id)).run();
+    bot.reserveTradeId = match.id;
+    if (bot.status === "stopped" || bot.status === "stopped_range_exit") {
+      closeAllOpenPositions(bot, getGridPrice(bot.ticker));
+      settleReserve(bot);
+    }
   }
 }

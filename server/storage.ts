@@ -14,6 +14,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc } from "drizzle-orm";
 import { generateAllStocks } from "./seed";
+import { getAlpacaPrice, ALPACA_STOCK_TICKERS } from "./alpaca";
 
 export const sqlite = new Database(process.env.DATA_DB_PATH ?? "data.db"); // V17: exported for shared use by grid-engine
 sqlite.pragma("journal_mode = WAL");
@@ -64,7 +65,9 @@ try {
   sqlite.exec(`ALTER TABLE trades ADD COLUMN take_profit REAL`);
 } catch (_) { /* column already exists */ }
 
-const STARTING_BALANCE = 500; // V17: raised from $100 — realistic position sizing (was too tight)
+import { STARTING_BALANCE } from "@shared/constants";
+export { STARTING_BALANCE };
+const EQUITY_CURVE_MAX_POINTS = 5000; // V17: raised from $100 — realistic position sizing (was too tight)
 
 // Cache stock data (generated once at startup)
 let stockDataCache = generateAllStocks();
@@ -98,11 +101,23 @@ const DEFAULT_SETTINGS: UserSettings = {
   alertPriceAlerts: false,
 };
 
+// Grid bots reserve capital through an open "buy" trade. That trade must be
+// valued from the grid's own P&L, not marked to market as if it were a stock
+// holding. grid-engine registers this valuer (it imports storage, so storage
+// can't import it back); it returns tradeId → current value of each running
+// bot's reserve.
+let gridReserveValuer: (() => Map<number, number>) | null = null;
+export function setGridReserveValuer(fn: () => Map<number, number>): void {
+  gridReserveValuer = fn;
+}
+
 export interface IStorage {
   getTrades(): Trade[];
   getOpenTrades(): Trade[];
   createTrade(trade: InsertTrade): Trade;
   closeTrade(id: number, closePrice: number, slippageCost?: number): Trade | undefined; // V17: slippage param added
+  partialCloseTrade(id: number, shares: number, closePrice: number, slippageCost?: number): Trade | undefined;
+  settleTrade(id: number, pnl: number): Trade | undefined;
   getEquityCurve(): EquityCurvePoint[];
   addEquityCurvePoint(point: InsertEquityCurve): EquityCurvePoint;
   getPortfolio(): PortfolioSummary;
@@ -147,12 +162,68 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(trades).where(eq(trades.id, id)).get();
   }
 
+  /**
+   * Sell part of an open trade. The open row keeps the unsold shares (and a
+   * proportional share of its cost); a new closed row records the sold slice
+   * with its realized P&L. Cash in getPortfolio() stays consistent because the
+   * two rows' totals add up to the original total.
+   */
+  partialCloseTrade(id: number, shares: number, closePrice: number, slippageCost: number = 0): Trade | undefined {
+    const trade = db.select().from(trades).where(eq(trades.id, id)).get();
+    if (!trade || trade.status === "closed") return undefined;
+    if (!(shares > 0) || shares >= trade.shares) return undefined;
+
+    const soldTotal = Math.round(trade.total * (shares / trade.shares) * 100) / 100;
+    const pnl = (closePrice - trade.price) * shares - slippageCost;
+
+    const closed = sqlite.transaction(() => {
+      db.update(trades)
+        .set({ shares: trade.shares - shares, total: Math.round((trade.total - soldTotal) * 100) / 100 })
+        .where(eq(trades.id, id))
+        .run();
+      return db.insert(trades).values({
+        ticker: trade.ticker,
+        action: trade.action,
+        shares,
+        price: trade.price,
+        total: soldTotal,
+        status: "closed",
+        pnl: Math.round(pnl * 100) / 100,
+        stopLoss: trade.stopLoss,
+        takeProfit: trade.takeProfit,
+        openedAt: trade.openedAt,
+        closedAt: new Date().toISOString(),
+      }).returning().get();
+    })();
+
+    this.snapshotEquity();
+    return closed;
+  }
+
+  /** Close an open trade with an externally computed P&L (grid bot reserves). */
+  settleTrade(id: number, pnl: number): Trade | undefined {
+    const trade = db.select().from(trades).where(eq(trades.id, id)).get();
+    if (!trade || trade.status === "closed") return undefined;
+    db.update(trades)
+      .set({ status: "closed", pnl: Math.round(pnl * 100) / 100, closedAt: new Date().toISOString() })
+      .where(eq(trades.id, id))
+      .run();
+    this.snapshotEquity();
+    return db.select().from(trades).where(eq(trades.id, id)).get();
+  }
+
   getEquityCurve(): EquityCurvePoint[] {
     return db.select().from(equityCurve).all();
   }
 
   addEquityCurvePoint(point: InsertEquityCurve): EquityCurvePoint {
-    return db.insert(equityCurve).values(point).returning().get();
+    const row = db.insert(equityCurve).values(point).returning().get();
+    // Keep the curve bounded: it gets a point per trade event plus every 5
+    // minutes, forever, and /api/equity-curve returns all of it.
+    if (row.id % 500 === 0) {
+      sqlite.prepare("DELETE FROM equity_curve WHERE id <= ?").run(row.id - EQUITY_CURVE_MAX_POINTS);
+    }
+    return row;
   }
 
   getPortfolio(): PortfolioSummary {
@@ -171,9 +242,13 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
+    const reserveValues = gridReserveValuer?.() ?? new Map<number, number>();
+    const gridReserves = openTrades.filter((t) => reserveValues.has(t.id));
+
     // Calculate positions (aggregate by ticker)
     const posMap = new Map<string, { shares: number; totalCost: number }>();
     for (const t of openTrades) {
+      if (reserveValues.has(t.id)) continue;
       const existing = posMap.get(t.ticker) || { shares: 0, totalCost: 0 };
       existing.shares += t.shares;
       existing.totalCost += t.total;
@@ -206,6 +281,21 @@ export class DatabaseStorage implements IStorage {
 
       investedValue += marketValue;
       dayPnl += dayPnlForPos;
+    }
+
+    for (const t of gridReserves) {
+      const value = reserveValues.get(t.id)!;
+      const pnl = value - t.total;
+      positions.push({
+        ticker: t.ticker,
+        shares: Math.round(t.shares * 10000) / 10000,
+        avgCost: Math.round(t.price * 100) / 100,
+        currentPrice: t.shares > 0 ? Math.round((value / t.shares) * 100) / 100 : 0,
+        marketValue: Math.round(value * 100) / 100,
+        unrealizedPnl: Math.round(pnl * 100) / 100,
+        unrealizedPnlPercent: t.total > 0 ? Math.round((pnl / t.total) * 10000) / 100 : 0,
+      });
+      investedValue += value;
     }
 
     const totalValue = Math.round((cash + investedValue) * 100) / 100;
@@ -302,16 +392,30 @@ if (storage.getEquityCurve().length === 0) {
   });
 }
 
-// ─── Live Price Simulator ────────────────────────────────────────────────────
-// Sinusoidal oscillator with superimposed random noise.
-// Each ticker gets a unique phase, frequency, and amplitude derived from its
-// hash — guaranteeing independent, continuous oscillation around the seed price.
-// Price NEVER drifts out of the ±25% band around the seed.
+// ─── Grid Bot Price Source ───────────────────────────────────────────────────
+// Grid bots read the live Alpaca quote when one is fresh. Otherwise they fall
+// back to a sinusoidal oscillator with superimposed noise: each ticker gets a
+// unique phase, frequency, and amplitude derived from its hash, and the price
+// never leaves the ±25% band around the seed.
+//
+// Simulated grid prices live in their own map and are NOT written into
+// stockDataCache, which belongs to the auto-trader's price model. Sharing it
+// made the two simulators overwrite each other's prices.
 
 const tickCounts = new Map<string, number>(); // per-ticker tick counter
+const gridSimPrices = new Map<string, number>();
 
-/** Advance the simulated price for a ticker by one tick */
-export function advancePrice(ticker: string): number {
+function liveGridPrice(ticker: string): number | null {
+  if (!ALPACA_STOCK_TICKERS.has(ticker)) return null;
+  const p = getAlpacaPrice(ticker);
+  return p != null && p > 0 ? p : null;
+}
+
+/** Advance the grid price for a ticker by one tick and return it. */
+export function advanceGridPrice(ticker: string): number {
+  const live = liveGridPrice(ticker);
+  if (live != null) return live;
+
   const stock = stockDataCache.find(s => s.ticker === ticker);
   if (!stock) return 0;
 
@@ -342,19 +446,15 @@ export function advancePrice(ticker: string): number {
   // Combined wave — always bounded to ±25% around mu
   const raw      = mu * (1 + amp * (primary + secondary) * 0.6 + noise);
   const newPrice = Math.max(mu * 0.75, Math.min(mu * 1.25, raw));
-  const rounded  = Math.round(newPrice * 100) / 100;
-
-  // Update cache so /api/signals/:ticker returns live price
-  const idx = stockDataCache.findIndex(s => s.ticker === ticker);
-  if (idx >= 0) {
-    stockDataCache[idx] = { ...stockDataCache[idx], price: rounded };
-  }
+  gridSimPrices.set(ticker, Math.round(newPrice * 100) / 100);
 
   return newPrice;
 }
 
-/** Get the current live price without advancing */
-export function getLivePrice(ticker: string): number {
-  const stock = stockDataCache.find(s => s.ticker === ticker);
-  return stock?.price ?? 0;
+/** Current grid price without advancing (live quote, else last simulated, else seed). */
+export function getGridPrice(ticker: string): number {
+  return liveGridPrice(ticker)
+    ?? gridSimPrices.get(ticker)
+    ?? _ORIGINAL_PRICES_FROZEN.get(ticker)
+    ?? 0;
 }

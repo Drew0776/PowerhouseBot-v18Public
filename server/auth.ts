@@ -25,7 +25,11 @@ const SESSION_SECRET: string = process.env.SESSION_SECRET ?? crypto.randomBytes(
 // ── Passport strategy ────────────────────────────────────────────────────────
 passport.use(
   new LocalStrategy({ usernameField: "password", passwordField: "password" }, (password, _ignored, done) => {
-    if (crypto.timingSafeEqual(Buffer.from(password), Buffer.from(OPERATOR_PASSWORD))) {
+    // Compare fixed-length digests: timingSafeEqual throws on unequal
+    // lengths, which would turn a wrong-length guess into a 500.
+    const given = crypto.createHash("sha256").update(String(password)).digest();
+    const expected = crypto.createHash("sha256").update(OPERATOR_PASSWORD).digest();
+    if (crypto.timingSafeEqual(given, expected)) {
       return done(null, { id: "operator" });
     }
     return done(null, false, { message: "Invalid password" });
@@ -40,6 +44,9 @@ passport.deserializeUser((id: string, done) => {
 
 // ── Wire session + passport onto the Express app ────────────────────────────
 export function setupAuth(app: Express): void {
+  // Replit / Railway terminate TLS at a proxy; trust it so `secure: "auto"`
+  // can see the original https scheme.
+  app.set("trust proxy", 1);
   app.use(
     session({
       secret: SESSION_SECRET,
@@ -49,6 +56,7 @@ export function setupAuth(app: Express): void {
       cookie: {
         httpOnly: true,
         sameSite: "lax",
+        secure: "auto",
         maxAge: 7 * 24 * 60 * 60 * 1000,
       },
     }),
@@ -58,14 +66,9 @@ export function setupAuth(app: Express): void {
 }
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
-// Task #67: auth gate intentionally bypassed — dashboard is open.
-// The passport strategy, /api/auth/login, /api/auth/logout routes, the
-// OPERATOR_PASSWORD env var, and the client/src/pages/login.tsx page are
-// all left in place. To re-enable, restore the isAuthenticated() check
-// below and flip the `isAuthenticated = true` short-circuit in
-// client/src/App.tsx.
-export function requireAuth(_req: Request, _res: Response, next: NextFunction): void {
-  return next();
+export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (req.isAuthenticated()) return next();
+  res.status(401).json({ message: "Unauthorized" });
 }
 
 export { passport };

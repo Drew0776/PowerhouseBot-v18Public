@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { queryClient } from "@/lib/queryClient";
 
@@ -7,7 +6,6 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [, setLocation] = useLocation();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -15,8 +13,8 @@ export default function Login() {
     setLoading(true);
     try {
       await apiRequest("POST", "/api/auth/login", { password });
+      // Refreshing /api/auth/check is enough: AppRouter then redirects /login → /.
       await queryClient.invalidateQueries();
-      setLocation("/");
     } catch (_err) {
       setError("Invalid password. Please try again.");
     } finally {
