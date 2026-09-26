@@ -240,11 +240,25 @@ export class DatabaseStorage implements IStorage {
     const agg = sqlite.prepare(`
       SELECT
         COALESCE(SUM(CASE WHEN action = 'buy' THEN total ELSE 0 END), 0)                          AS spent,
-        COALESCE(SUM(CASE WHEN status = 'closed' AND pnl IS NOT NULL THEN total + pnl ELSE 0 END), 0) AS returned,
-        COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0)                          AS closedCount,
-        COALESCE(SUM(CASE WHEN status = 'closed' AND pnl > 0 THEN 1 ELSE 0 END), 0)              AS winCount
+        COALESCE(SUM(CASE WHEN status = 'closed' AND pnl IS NOT NULL THEN total + pnl ELSE 0 END), 0) AS returned
       FROM trades
-    `).get() as { spent: number; returned: number; closedCount: number; winCount: number };
+    `).get() as { spent: number; returned: number };
+    // Win rate counts positions, not rows: a T1 partial exit is stored as its
+    // own closed row carrying the parent's ticker, entry price and open time,
+    // so rows are grouped on those, P&L summed, and a position still partly
+    // open isn't counted until it is fully closed.
+    const wr = sqlite.prepare(`
+      SELECT COUNT(*) AS closedCount, COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS winCount
+      FROM (
+        SELECT ticker, opened_at, price, SUM(COALESCE(pnl, 0)) AS pnl
+        FROM trades WHERE status = 'closed'
+        GROUP BY ticker, opened_at, price
+      ) g
+      WHERE NOT EXISTS (
+        SELECT 1 FROM trades o
+        WHERE o.status = 'open' AND o.ticker = g.ticker AND o.opened_at = g.opened_at AND o.price = g.price
+      )
+    `).get() as { closedCount: number; winCount: number };
     const openTrades = db.select().from(trades).where(eq(trades.status, "open")).orderBy(desc(trades.id)).all();
 
     const cash = STARTING_BALANCE - agg.spent + agg.returned;
@@ -313,8 +327,8 @@ export class DatabaseStorage implements IStorage {
     const dayPnl = Math.round((totalValue - dayStart) * 100) / 100;
     const dayPnlPercent = dayStart > 0 ? Math.round((dayPnl / dayStart) * 10000) / 100 : 0;
 
-    const winRate = agg.closedCount > 0
-      ? Math.round((agg.winCount / agg.closedCount) * 10000) / 100
+    const winRate = wr.closedCount > 0
+      ? Math.round((wr.winCount / wr.closedCount) * 10000) / 100
       : 0;
 
     // Risk score: based on concentration and position count

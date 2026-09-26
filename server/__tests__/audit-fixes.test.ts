@@ -231,9 +231,18 @@ test("getPortfolio's SQL aggregates match the row-by-row arithmetic", () => {
     if (t.action === "buy") cash -= t.total;
     if (t.status === "closed" && t.pnl !== null) cash += t.total + t.pnl;
   }
-  const closed = all.filter(t => t.status === "closed");
-  const wins = closed.filter(t => t.pnl !== null && t.pnl > 0).length;
-  const expectedWinRate = closed.length > 0 ? Math.round((wins / closed.length) * 10000) / 100 : 0;
+  // Win rate is per position: closed rows sharing ticker, open time and entry
+  // price (a T1 partial and its remainder) are one position, counted once it
+  // has no open row left.
+  const key = (t: typeof all[number]) => `${t.ticker}|${t.openedAt}|${t.price}`;
+  const stillOpen = new Set(all.filter(t => t.status === "open").map(key));
+  const positions = new Map<string, number>();
+  for (const t of all) {
+    if (t.status !== "closed" || stillOpen.has(key(t))) continue;
+    positions.set(key(t), (positions.get(key(t)) ?? 0) + (t.pnl ?? 0));
+  }
+  const wins = [...positions.values()].filter(v => v > 0).length;
+  const expectedWinRate = positions.size > 0 ? Math.round((wins / positions.size) * 10000) / 100 : 0;
 
   const p = storage.getPortfolio();
   assert.equal(p.cash, Math.round(cash * 100) / 100);
