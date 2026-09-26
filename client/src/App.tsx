@@ -33,16 +33,27 @@ function AuthenticatedApp() {
 }
 
 function AppRouter() {
-  // Task #67: auth gate intentionally bypassed — dashboard loads instantly,
-  // no /api/auth/check probe, no /login redirect. The /login route stays
-  // registered (and the page file remains) so this can be reverted by
-  // restoring the useQuery + isAuthenticated check. Server side: see
-  // server/auth.ts:requireAuth.
+  const { data: authData, isLoading } = useQuery<{ authenticated: boolean }>({
+    queryKey: ["/api/auth/check"],
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  const isAuthenticated = authData?.authenticated === true;
+
   return (
     <Switch>
       <Route path="/login" component={Login} />
       <Route>
-        <AuthenticatedApp />
+        {isAuthenticated ? <AuthenticatedApp /> : <Redirect to="/login" />}
       </Route>
     </Switch>
   );

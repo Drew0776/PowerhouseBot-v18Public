@@ -4,8 +4,10 @@ const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    // Task #67: auth bypassed — no /login redirect on 401. If a stray
-    // 401 ever shows up it's a bug to surface, not silently swallow.
+    // Session expired or never logged in — send the operator to the login page.
+    if (res.status === 401 && !res.url.endsWith("/api/auth/login")) {
+      window.location.hash = "/login";
+    }
     const text = (await res.text()) || res.statusText;
     throw new Error(`${res.status}: ${text}`);
   }

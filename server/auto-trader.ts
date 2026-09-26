@@ -160,19 +160,11 @@ export interface AutoTraderState {
 
 // ─── V9 Constants — Audit-Corrected ──────────────────────────────────────────
 
-// FINDING 1+2 FIX: Price model constants
-// New signal-to-noise ratio: 0.006 / 0.0018 = 3.33 (was 0.375)
-// T1 at 1.2×ATR = +0.97% above entry
-// At drift 0.006/tick: T1 hit in avg 0.0097/0.006 = 16 ticks ✓
-
-// V10 LIVE AUDIT FIX: 89% MAX_HOLD because trend expires before 30t hold
-// FULL_TARGET hits in ~3t when trend active → increase drift, extend trend window
-const TICK_VOL_BASE    = 0.0012;  // Tighter noise (was 0.0018)
-const TREND_DRIFT_BASE = 0.0125;  // V12: +25% drift   // Stronger drift (was 0.006) → targets in 2-5 ticks
+// Per-tick volatility of the simulated random walk (no drift — see advancePrice).
+const TICK_VOL_BASE    = 0.0012;
 
 // Multipliers by asset class (relative to stock baseline)
 const CLASS_VOL:   Record<string, number> = { stock: 1.0, penny: 2.0, crypto: 1.5, forex: 0.4, commodity: 0.7, index: 0.5 };
-const CLASS_DRIFT: Record<string, number> = { stock: 1.0, penny: 1.8, crypto: 1.5, forex: 1.0, commodity: 0.9, index: 0.7 };  // V14: forex 0.6→1.0 to fix AUDUSD 15% FT rate
 
 // FINDING 2 FIX: Tighter ATR-based targets
 // ATR = price × tickVol × √20 × 1.0 (removed 1.5× multiplier that bloated ATR)
@@ -223,24 +215,20 @@ function slippage(shares: number, price: number, mt: string): number {
   return Math.max(0, Math.round((price * rate * shares + fixed) * 10000) / 10000);
 }
 
-// ─── V9 Price Simulator — High-Drift Directional Model ───────────────────────
+// ─── Price Simulator — driftless random walk ─────────────────────────────────
 //
-// AUDIT FIX: Signal-to-noise = 3.33 (was 0.375)
-// When instrument is "bullish": strong upward drift dominates noise
-// Prices reliably reach T1 within 15-25 ticks
+// Used for instruments without a live Alpaca quote. There is deliberately no
+// directional drift: earlier versions switched on a strong upward trend for
+// whatever the scanner picked and for every open position, which made the
+// bot's own picks rise by construction and fabricated its win rate.
 
 interface PriceState {
   price: number;
   lcg: number;
-  mode: "trending" | "ranging";
-  trendTicks: number;
-  drift: number;
 }
 
 const _prices = new Map<string, PriceState>();
 const _seeds  = new Map<string, number>();
-// V10: Track when each ticker's trend was activated (for freshness gate)
-const _trendStartTick = new Map<string, number>();
 // V11: Tracks tickers that just hit FULL_TARGET — gets 1.5× position boost
 const _hotTickers = new Map<string, number>(); // ticker → tick when T2 was hit
 
@@ -250,13 +238,7 @@ function getVol(ticker: string, mt: string): number {
   return TICK_VOL_BASE * (CLASS_VOL[cls] ?? 1.0);
 }
 
-function getDrift(ticker: string, mt: string): number {
-  const s = getStockByTicker(ticker);
-  const cls = (s && s.price < 5) ? "penny" : mt;
-  return TREND_DRIFT_BASE * (CLASS_DRIFT[cls] ?? 1.0);
-}
-
-function advancePrice(ticker: string, mt: string, bullish = false): number {
+function advancePrice(ticker: string, mt: string): number {
   // V18: If real Alpaca price available for this stock, use it as the anchor
   // This replaces the GBM simulation with the actual market price
   if (ALPACA_STOCK_TICKERS.has(ticker)) {
@@ -267,12 +249,10 @@ function advancePrice(ticker: string, mt: string, bullish = false): number {
       const stock = getStockByTicker(ticker);
       if (!g) {
         const h = ticker.split("").reduce((a: number, c: string) => a + c.charCodeAt(0), 0) * 137;
-        _prices.set(ticker, { price: realPrice, lcg: h, mode: "ranging", trendTicks: 0, drift: 0 });
+        _prices.set(ticker, { price: realPrice, lcg: h });
         _seeds.set(ticker, realPrice);
       } else {
-        // Blend real price: 80% real, 20% simulated momentum (preserves T1/T2 reachability)
-        const blended = realPrice * 0.80 + g.price * 0.20;
-        g.price = Math.round(blended * 10000) / 10000;
+        g.price = realPrice;
       }
       // Update stock data array with real price
       const all = getStockData();
@@ -290,7 +270,7 @@ function advancePrice(ticker: string, mt: string, bullish = false): number {
 
   if (!_prices.has(ticker)) {
     const h = ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-    _prices.set(ticker, { price: stock.price, lcg: h, mode: "ranging", trendTicks: 0, drift: 0 });
+    _prices.set(ticker, { price: stock.price, lcg: h });
   }
   const g = _prices.get(ticker)!;
 
@@ -303,23 +283,7 @@ function advancePrice(ticker: string, mt: string, bullish = false): number {
 
   const vol = getVol(ticker, mt);
 
-  // Trigger trend on bullish signal — record tick so entry gate can check freshness
-  // V13: Force re-trigger on bullish entry regardless of current mode
-  // Audit showed MAX_HOLD 65% — positions entered without fresh trend activation
-  if (bullish) {
-    g.mode = "trending";
-    g.trendTicks = MAX_HOLD_NO_T1 + 30 + (g.lcg % 20); // V10: 80-100 ticks trend window
-    g.drift = getDrift(ticker, mt);
-    _trendStartTick.set(ticker, state.totalTicks); // record freshness
-  }
-
-  if (g.mode === "trending" && g.trendTicks > 0) {
-    g.trendTicks--;
-    if (g.trendTicks === 0) { g.mode = "ranging"; g.drift = 0; }
-  }
-
-  const drift = g.mode === "trending" ? g.drift : 0;
-  g.price = g.price * (1 + drift + vol * z);
+  g.price = g.price * (1 + vol * z);
 
   // Bound ±55% from seed
   g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price));  // V11: ±80% bounds (was ±55%)
@@ -518,13 +482,9 @@ function sizePosition(
 
 // ─── Scanner — FINDING 3+5 FIX: Rank-Based ───────────────────────────────────
 
-const bullishTickers = new Set<string>();
-
 export function scanForBreakouts(): BreakoutSignal[] {
   const all = getStockData();
   const regime = detectRegime();
-
-  bullishTickers.clear();
 
   // Step 1: Advance prices for instruments NOT in open positions
   // (Open positions are already advanced in managePositions — avoid double-advancing)
@@ -536,7 +496,7 @@ export function scanForBreakouts(): BreakoutSignal[] {
       const g = _prices.get(s.ticker);
       updateMTF(s.ticker, g ? g.price : s.price);
     } else {
-      const newPrice = advancePrice(s.ticker, mt, false);
+      const newPrice = advancePrice(s.ticker, mt);
       updateMTF(s.ticker, newPrice > 0 ? newPrice : s.price);
     }
   }
@@ -638,14 +598,6 @@ export function scanForBreakouts(): BreakoutSignal[] {
       atr,
       marketType: r.mt,
     });
-
-    bullishTickers.add(r.ticker);
-  }
-
-  // Activate trending mode for top signals
-  for (const ticker of bullishTickers) {
-    const s = getStockByTicker(ticker);
-    if (s) advancePrice(ticker, (s as any).marketType ?? "stock", true);
   }
 
   state.lastScan = signals.slice(0, 12);
@@ -758,8 +710,6 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
         state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
         updateStats();
         cooldowns.set(worst.ticker, state.totalTicks);
-        const g = _prices.get(worst.ticker);
-        if (g) { g.mode = "ranging"; g.trendTicks = 0; g.drift = 0; }
         const idx = state.openPositions.indexOf(worst);
         if (idx >= 0) state.openPositions.splice(idx, 1);
         log(`♻️ RECYCLE | Closed ${worst.ticker} (${worst.pnlPct.toFixed(1)}% pnl, ${worst.ticksOpen}t) → making room for A+ ${sig.ticker}`);
@@ -773,12 +723,6 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
 
   const lastExit = cooldowns.get(sig.ticker) ?? 0;
   if (state.totalTicks - lastExit < COOLDOWN) return null;
-
-  // V10: Trend freshness gate — only enter if trend activated within last 5 ticks
-  // Prevents entering stale trends that are close to expiry
-  const trendStart = _trendStartTick.get(sig.ticker) ?? 0;
-  const trendAge = state.totalTicks - trendStart;
-  if (trendAge > 25 && trendAge < 9999) return null; // V16: 25t window (was 15t) — more room to enter fresh trend
 
   // Audit Page 9 #2: Diversification + forex 12% portfolio cap
   const mt = sig.marketType;
@@ -939,7 +883,7 @@ function managePositions() {
     if (!stock) continue;
 
     const mt = pos.marketType;
-    const newPrice = advancePrice(pos.ticker, mt, true); // keep trending
+    const newPrice = advancePrice(pos.ticker, mt);
     const cur = newPrice > 0 ? newPrice : stock.price;
 
     pos.currentPrice = Math.round(cur * 10000) / 10000;
@@ -965,6 +909,9 @@ function managePositions() {
       const halfSh = Math.round(pos.sharesRemaining * 0.40 * 10000) / 10000;
       const exitSlip = slippage(halfSh, pos.takeProfit1, mt);
       const t1pnl = Math.round(((pos.takeProfit1 - pos.entryPrice) * halfSh - exitSlip) * 100) / 100;
+      // Record the partial sale in the DB so the trade log and portfolio cash
+      // match the engine; the open row keeps only the remaining shares.
+      storage.partialCloseTrade(pos.tradeId, halfSh, pos.takeProfit1, exitSlip);
       pos.sharesRemaining -= halfSh;
       state.totalPnl = Math.round((state.totalPnl + t1pnl) * 100) / 100;
       state.dailyPnl = Math.round((state.dailyPnl + t1pnl) * 100) / 100;
@@ -1070,9 +1017,6 @@ function managePositions() {
       }
 
       cooldowns.set(pos.ticker, state.totalTicks);
-      // Reset trend when position closed
-      const g = _prices.get(pos.ticker);
-      if (g) { g.mode = "ranging"; g.trendTicks = 0; g.drift = 0; }
 
       state.closedTrades++;
       state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
@@ -1152,7 +1096,7 @@ export function autoTraderTick(): { signals: BreakoutSignal[]; entered: ActivePo
     const all = getStockData();
     for (const s of all) {
       const g = _prices.get(s.ticker);
-      if (g && g.mode === "ranging") {
+      if (g) {
         _seeds.set(s.ticker, g.price); // Use current price as new seed
       }
     }
@@ -1228,13 +1172,13 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   const lPrices = new Map<string, PriceState>();
   for (const s of all) {
     const h = s.ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-    lPrices.set(s.ticker, { price: s.price, lcg: h + 54321, mode: "ranging", trendTicks: 0, drift: 0 });
+    lPrices.set(s.ticker, { price: s.price, lcg: h + 54321 });
   }
 
   const lMTF = new Map<string, number[]>();
   const lCooldowns = new Map<string, number>();
 
-  function lAdvance(ticker: string, mt: string, bull: boolean): number {
+  function lAdvance(ticker: string, mt: string): number {
     const seed = _seeds.get(ticker) ?? getStockByTicker(ticker)?.price ?? 1;
     const g = lPrices.get(ticker);
     if (!g) return seed;
@@ -1244,18 +1188,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
     const u2 = g.lcg / 0xffffffff;
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
     const vol = getVol(ticker, mt);
-
-    if (bull && g.mode === "ranging") {
-      g.mode = "trending";
-      g.trendTicks = MAX_HOLD_NO_T1 + 15 + (g.lcg % 10); // V16: +10t window (45-55t, was 35-45t)
-      g.drift = getDrift(ticker, mt);
-    }
-    if (g.mode === "trending" && g.trendTicks > 0) {
-      g.trendTicks--;
-      if (g.trendTicks === 0) { g.mode = "ranging"; g.drift = 0; }
-    }
-    const drift = g.mode === "trending" ? g.drift : 0;
-    g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price * (1 + drift + vol * z)));  // V11: ±80%
+    g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price * (1 + vol * z)));  // V11: ±80%
     g.price = Math.round(g.price * 10000) / 10000;
     return g.price;
   }
@@ -1275,8 +1208,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 
     for (const s of all) {
       const mt = (s as any).marketType ?? "stock";
-      const isBull = positions.some(p => p.ticker === s.ticker);
-      const p = lAdvance(s.ticker, mt, isBull);
+      const p = lAdvance(s.ticker, mt);
       const mh = lMTF.get(s.ticker) ?? [];
       mh.push(p); if (mh.length > 20) mh.shift();
       lMTF.set(s.ticker, mh);
@@ -1320,8 +1252,6 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
           if (pnl >= 0) { oosW++; oosWA += pnl; } else { oosL++; oosLA += Math.abs(pnl); }
         }
         lCooldowns.set(pos.ticker, tick);
-        const g2 = lPrices.get(pos.ticker);
-        if (g2) { g2.mode = "ranging"; g2.trendTicks = 0; }
         positions.splice(pi, 1);
       }
     }
@@ -1376,7 +1306,6 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
       // (do NOT also subtract from balance — that would double-count slippage)
       const adjEntry = cand.price + sl / Math.max(shares, 0.0001);
       if (inIS) isSl += sl; else oosSl += sl;
-      lAdvance(cand.ticker, cand.mt, true);
       positions.push({
         ticker: cand.ticker, mt: cand.mt,
         entry: adjEntry,
@@ -1448,9 +1377,7 @@ export function startAutoTrader() {
   _prices.clear();
   _seeds.clear();
   _mtf.clear();
-  _trendStartTick.clear();
   _hotTickers.clear();
-  bullishTickers.clear();
   cooldowns.clear();
   pendingEntries.length = 0; // Task #49: drop any stale working limits across restarts
   t1HitCount = 0;
@@ -1463,7 +1390,7 @@ export function startAutoTrader() {
   for (const pos of restoredPositions) {
     const seedPrice = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
     const h = pos.ticker.split("").reduce((a: number, c: string) => a + c.charCodeAt(0), 0) * 137;
-    _prices.set(pos.ticker, { price: seedPrice, lcg: h, mode: "ranging", trendTicks: 0, drift: 0 });
+    _prices.set(pos.ticker, { price: seedPrice, lcg: h });
     _seeds.set(pos.ticker, seedPrice);
   }
 
@@ -1803,8 +1730,7 @@ export function resetAutoTraderState() {
 
   // Clear simulation maps
   _prices.clear(); _seeds.clear(); _mtf.clear();
-  _trendStartTick.clear(); _hotTickers.clear();
-  bullishTickers.clear(); cooldowns.clear();
+  _hotTickers.clear(); cooldowns.clear();
   pendingEntries.length = 0; // Task #49: drop pending limits on full reset
 
   // Reset daily tracking

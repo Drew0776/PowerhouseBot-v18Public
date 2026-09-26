@@ -295,6 +295,10 @@ export const gridBots = sqliteTable("grid_bots", {
   stoppedAt: text("stopped_at"),
   realizedPnl: real("realized_pnl").notNull().default(0),
   totalGridFills: integer("total_grid_fills").notNull().default(0),
+  // The open trade that reserves this bot's capital in the portfolio. Settled
+  // with the bot's realized P&L when the bot stops. Null for bots created
+  // before this column existed.
+  reserveTradeId: integer("reserve_trade_id"),
 });
 
 export const insertGridBotSchema = createInsertSchema(gridBots).omit({
