@@ -36,6 +36,7 @@ import {
   isAlpacaConfigured,
 } from "./alpaca";
 import type { StockData } from "@shared/schema";
+import { isRegularSessionOpen } from "./market-calendar";
 
 // ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
 //
@@ -201,8 +202,9 @@ const POS_MAX_PCT = 0.50;  // V10: 50% max (was 40%)
 // The old "event blackout" fired at fixed tick counts (FOMC at tick 200 …),
 // not on real dates, so it only ever ran in the first ~30 minutes after a
 // reset. It's replaced by a real session gate: with a live Alpaca feed, new
-// stock entries are only taken during the US regular session (9:30–16:00 ET,
-// Mon–Fri; exchange holidays are not modelled). eventFilterActive /
+// stock entries are only taken during the US regular session (9:30–16:00 ET on
+// exchange trading days, 13:00 on early-close days; see market-calendar.ts).
+// eventFilterActive /
 // currentEvent now report that gate so the dashboard badge stays meaningful.
 
 function etNow(): Date {
@@ -210,10 +212,7 @@ function etNow(): Date {
 }
 
 export function isUsMarketOpen(now: Date = etNow()): boolean {
-  const day = now.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = now.getHours() * 60 + now.getMinutes();
-  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+  return isRegularSessionOpen(now);
 }
 
 /** Live mode: stock prices come from Alpaca, never from the simulator. */
