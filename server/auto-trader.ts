@@ -41,19 +41,17 @@ import { rsi as rsiOf, ema, macd, bollingerPctB, realizedVol, momentumZ } from "
 import { roundPrice, formatPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
 import { estimateEdge, meanCI95 } from "./stats";
+import { simTickVol } from "./sim-vol";
 
 // ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
 //
-// Replaces the prior "market order at currentPrice" execution path. Entries
-// submit limit orders priced at-or-just-inside the current bid/ask; exits use
-// limit (take-profit) or stop-limit (stop-loss) prices with a configurable
-// slippage tolerance. If a limit isn't filled within ENTRY_FILL_WINDOW ticks
-// it is repriced once, then cancelled.
+// Entries submit limit orders priced at-or-just-inside the current ask. If a
+// limit isn't filled within ENTRY_FILL_WINDOW ticks it is repriced once, then
+// cancelled. Exits are described at exitFill().
 
 /** Max slippage (as a fraction of price) we'll accept relative to the limit. */
 const ENTRY_SLIPPAGE_TOL = 0.0015;   // 0.15% above mid for buy entries
 const ENTRY_REPRICE_TOL  = 0.0035;   // 0.35% above mid on the single reprice
-const EXIT_SLIPPAGE_TOL  = 0.0025;   // 0.25% allowed past stop on stop-limit exits
 /** How many ticks a pending entry order stays live before being repriced/cancelled. */
 const ENTRY_FILL_WINDOW  = 3;
 const ENTRY_MAX_ATTEMPTS = 2;        // 1 initial + 1 reprice
@@ -166,12 +164,7 @@ export interface AutoTraderState {
 }
 
 // ─── V9 Constants — Audit-Corrected ──────────────────────────────────────────
-
-// Per-tick volatility of the simulated random walk (no drift — see advancePrice).
-const TICK_VOL_BASE    = 0.0012;
-
-// Multipliers by asset class (relative to stock baseline)
-const CLASS_VOL:   Record<string, number> = { stock: 1.0, penny: 2.0, crypto: 1.5, forex: 0.4, commodity: 0.7, index: 0.5 };
+// (Simulator volatility lives in sim-vol.ts, shared with the grid simulator.)
 
 // FINDING 2 FIX: Tighter ATR-based targets
 // ATR = price × tickVol × √20 × 1.0 (removed 1.5× multiplier that bloated ATR)
@@ -273,13 +266,11 @@ interface PriceState {
 
 const _prices = new Map<string, PriceState>();
 const _seeds  = new Map<string, number>();
-// V11: Tracks tickers that just hit FULL_TARGET — gets 1.5× position boost
-const _hotTickers = new Map<string, number>(); // ticker → tick when T2 was hit
 
 function getVol(ticker: string, mt: string): number {
-  const s = getStockByTicker(ticker);
-  const cls = (s && s.price < 5) ? "penny" : mt;
-  return TICK_VOL_BASE * (CLASS_VOL[cls] ?? 1.0);
+  // Only stocks under $5 count as penny stocks. (Any instrument under $5 used
+  // to, so FX pairs near 1.0 moved at 5× their class volatility.)
+  return simTickVol(getStockByTicker(ticker)?.price ?? 0, mt);
 }
 
 function advancePrice(ticker: string, mt: string): number {
@@ -512,8 +503,9 @@ function detectRegime(): "trending" | "ranging" {
 
 function sizePosition(
   compositeScore: number,
-  portfolio: { cash: number; totalValue: number }
-): { posSize: number; shares: number; kf: number } {
+  portfolio: { cash: number; totalValue: number },
+  record: { wins: number; losses: number; totalWin: number; totalLoss: number },
+): { posSize: number; kf: number } {
   const { cash, totalValue } = portfolio;
 
   // Compounding multiplier
@@ -529,7 +521,7 @@ function sizePosition(
   // no measured edge (f* ≤ 0) it keeps trading at a small probe risk so it
   // can still gather evidence. (This used to treat the ranking score as a win
   // probability, which it isn't.)
-  const edge = estimateEdge({ wins, losses, totalWin: totalWinAmt, totalLoss: totalLossAmt });
+  const edge = estimateEdge(record);
   const kf = Math.max(PROBE_RISK, Math.min(edge.kelly / 2, KELLY_CAP));
 
   // V9 AUDIT FIX: 30-40% of cash per position
@@ -537,7 +529,108 @@ function sizePosition(
   let posSize = cash * (POS_MIN_PCT + (compositeScore / 100) * (POS_MAX_PCT - POS_MIN_PCT));
   posSize = Math.min(posSize * mult, cash * 0.95);
 
-  return { posSize: Math.round(posSize * 100) / 100, shares: 0, kf };
+  return { posSize: Math.round(posSize * 100) / 100, kf };
+}
+
+// ─── Shared trade rules ──────────────────────────────────────────────────────
+// The live engine and the walk-forward backtest both call these, so the
+// backtest verdict is about the strategy that actually trades.
+
+type Grade = "A+" | "A" | "B" | "C";
+
+/** Grade by position in the ranked list: 1st A+, 2nd–3rd A, 4th–8th B, rest C. */
+export function gradeFor(rankIdx: number): Grade {
+  return rankIdx === 0 ? "A+" : rankIdx < 3 ? "A" : rankIdx < 8 ? "B" : "C";
+}
+
+/**
+ * Stops, targets and size for a new entry at `price`. Size starts from
+ * sizePosition's share of cash, is scaled by grade and the per-position caps
+ * (25% of the portfolio, 15% for forex), and is then limited so a stop-out
+ * loses at most kf of the portfolio. The risk limit is applied last so no
+ * multiplier can push a trade past it.
+ */
+export function planEntry(
+  price: number, atr: number, composite: number, grade: Grade, mt: string,
+  portfolio: { cash: number; totalValue: number },
+  record: { wins: number; losses: number; totalWin: number; totalLoss: number },
+): { stop: number; tp1: number; tp2: number; posSize: number; shares: number; kf: number; rr: number } {
+  const stop = Math.max(stopFloor(price), roundPrice(price - STOP_MULT * atr));
+  const tp1  = roundPrice(price + TP1_MULT * atr);
+  const tp2  = roundPrice(price + TP2_MULT * atr);
+  const rr   = (tp1 - price) / Math.max(price - stop, price * 1e-6);
+
+  let { posSize, kf } = sizePosition(composite, portfolio, record);
+  // V14 AUDIT FIX: Grade-based sizing — A+=100%  A=85%  B=60%  C=40%
+  posSize *= grade === "A+" ? 1.0 : grade === "A" ? 0.85 : grade === "B" ? 0.60 : 0.40;
+  posSize = Math.min(posSize, portfolio.totalValue * (mt === "forex" ? 0.15 : 0.25));
+  const stopPct = (price - stop) / price;
+  if (stopPct > 0) posSize = Math.min(posSize, (portfolio.totalValue * kf) / stopPct);
+  posSize = Math.floor(posSize * 100) / 100; // round down: never past the limit
+  const shares = Math.max(0.0001, Math.floor((posSize / price) * 10000) / 10000);
+  return { stop, tp1, tp2, posSize, shares, kf, rr };
+}
+
+/** Diversification: at most two stocks, and one position in each other class. */
+export function typeSlotFree(openTypes: string[], mt: string): boolean {
+  const same = openTypes.filter(t => t === mt).length;
+  return mt === "stock" ? same < 2 : same < 1;
+}
+
+/**
+ * Capital recycling: with every slot full, an A+ signal may replace the
+ * weakest position that hasn't reached T1, has been open more than 8 ticks and
+ * is up less than 0.5%.
+ */
+export function recycleCandidate<T>(open: T[], view: (p: T) => { tier1Hit: boolean; ticks: number; pnlPct: number }): T | null {
+  const c = open.filter(p => { const v = view(p); return !v.tier1Hit && v.ticks > 8 && v.pnlPct < 0.5; });
+  return c.length ? c.reduce((a, b) => (view(a).pnlPct < view(b).pnlPct ? a : b)) : null;
+}
+
+/** New trailing stop after a price high (moves only after T1, never down). */
+export function raiseTrail(p: { tier1Hit: boolean; entry: number; highWaterMark: number; atr: number; trailingStop: number }): number {
+  if (!p.tier1Hit) return p.trailingStop;
+  const profPct = (p.highWaterMark - p.entry) / p.entry * 100;
+  const tm = profPct > 20 ? 0.5 : profPct > 10 ? 0.7 : TRAIL_MULT;
+  return Math.max(p.trailingStop, roundPrice(p.highWaterMark - tm * p.atr));
+}
+
+export type ExitReason = "circuit_breaker" | "full_target" | "max_hold" | "trail_lock" | "stopped_out" | "gate_exit" | "momentum_exit" | "recycled";
+
+/**
+ * Exit rule, highest priority first: circuit breaker, T2, max hold, trailing
+ * stop, the -0.5% gate at 40 ticks, then an RSI collapse. `price` is the mark
+ * (mid); `sellable` is what a sell would get (the bid when quoted). Targets
+ * are resting limit sells, so they trigger on the sellable price.
+ */
+export function exitReasonFor(p: {
+  price: number; sellable: number; entry: number; trailingStop: number; tp2: number;
+  tier1Hit: boolean; ticks: number; rsi: number | null;
+}, breaker: boolean): ExitReason | null {
+  const pnlPct = (p.price - p.entry) / p.entry * 100;
+  if (breaker) return "circuit_breaker";
+  if (p.sellable >= p.tp2) return "full_target";
+  if (p.ticks >= (p.tier1Hit ? MAX_HOLD_T1 : MAX_HOLD_NO_T1)) return "max_hold";
+  if (p.price <= p.trailingStop) return pnlPct >= 0 ? "trail_lock" : "stopped_out";
+  if (!p.tier1Hit && p.ticks >= 40 && pnlPct < -0.50) return "gate_exit";
+  if ((p.rsi ?? 50) < 35 && pnlPct < -5 && !p.tier1Hit) return "momentum_exit";
+  return null;
+}
+
+/**
+ * Fill for an exit. T2 is a resting limit sell, so it fills at the target.
+ * Every other exit (stop, trailing stop, time, gate, breaker) is a market sell
+ * at the sellable price — the bid with a live quote, the simulated price
+ * otherwise. Both pay the modelled half-spread when there is no live quote
+ * (slippage() is zero with one, because the bid already includes it).
+ *
+ * Stops used to book at the stop price even when the market was already
+ * below it, and target, stop and time exits paid no spread at all, which
+ * made every losing trade look better than it could have been.
+ */
+export function exitFill(reason: ExitReason, p: { tp2: number; sellable: number }, cost: (price: number) => number): { price: number; cost: number } {
+  const price = reason === "full_target" ? p.tp2 : p.sellable;
+  return { price, cost: cost(price) };
 }
 
 // ─── Scanner — FINDING 3+5 FIX: Rank-Based ───────────────────────────────────
@@ -616,35 +709,13 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
     const r = ranked[i];
     const s = r.data;
 
-    // Assign grade by rank
-    const grade: BreakoutSignal["grade"] = i === 0 ? "A+" : i < 3 ? "A" : i < 8 ? "B" : "C";
-
+    const grade = gradeFor(i);
     const price = s.price;
     const atr   = estimateATR(r.ticker, r.mt, price);
-    const stop  = Math.max(stopFloor(price), roundPrice(price - STOP_MULT * atr));
-    const tp1   = roundPrice(price + TP1_MULT * atr);
-    const tp2   = roundPrice(price + TP2_MULT * atr);
-    const rr    = (tp1 - price) / Math.max(price - stop, price * 1e-6);
-
     if (portfolio.cash < 1) continue;
-    let { posSize, kf } = sizePosition(r.compositeScore, portfolio);
-
-    // Risk cap: a stop-out may lose at most kf (≤ KELLY_CAP) of the portfolio.
-    const stopPct = (price - stop) / price;
-    if (stopPct > 0) posSize = Math.min(posSize, (portfolio.totalValue * kf) / stopPct);
-
-    // V14 AUDIT FIX: Grade-based sizing — IREN (A, 100% FT) > AUDUSD (B, 15% FT)
-    // A+=100%  A=85%  B=60%  C=40%
-    const gFactor = grade === "A+" ? 1.0 : grade === "A" ? 0.85 : grade === "B" ? 0.60 : 0.40;
-    posSize *= gFactor;
-
-    // Hot ticker boost
-    const hotAt = _hotTickers.get(r.ticker) ?? -999;
-    if (state.totalTicks - hotAt <= 30) {
-      posSize = Math.min(posSize * 1.5, portfolio.cash * 0.90);
-    }
+    const { stop, tp1, tp2, posSize, shares, kf, rr } =
+      planEntry(price, atr, r.compositeScore, grade, r.mt, portfolio, edgeRecord());
     if (posSize < 0.10) continue;
-    const shares = Math.max(0.0001, Math.floor((posSize / price) * 10000) / 10000);
 
     signals.push({
       ticker: r.ticker, price,
@@ -700,6 +771,11 @@ const cooldowns = new Map<string, number>();
 const dailyStart = { value: STARTING_BALANCE, tick: 0, dateKey: '' }; // V17: dateKey tracks calendar day for daily P&L reset
 const pnlHistory: number[] = [];
 
+/** This engine's closed-trade record, the input to Kelly sizing. */
+function edgeRecord() {
+  return { wins, losses, totalWin: totalWinAmt, totalLoss: totalLossAmt };
+}
+
 function log(msg: string) {
   const ts = new Date().toISOString().slice(11, 19);
   state.log.unshift(`[${ts}] ${msg}`);
@@ -746,6 +822,45 @@ function updateStats() {
 // price); otherwise it returns null and the caller treats it as "no entry
 // this tick".
 
+/** Price a sell would get now: the bid with a live quote, else the mark. */
+function sellablePrice(pos: ActivePosition): number {
+  const q = ALPACA_STOCK_TICKERS.has(pos.ticker) ? getAlpacaQuote(pos.ticker) : null;
+  return q && q.bid > 0 ? q.bid : pos.currentPrice;
+}
+
+/**
+ * Sell a position's remaining shares at `fillPx` and book the result: trade
+ * row, engine P&L, win/loss record, cooldown and log. The caller removes it
+ * from state.openPositions.
+ */
+function closePosition(pos: ActivePosition, fillPx: number, exitSlip: number, reason: ExitReason): void {
+  const closePnl = Math.round(((fillPx - pos.entryPrice) * pos.sharesRemaining - exitSlip) * 100) / 100;
+  state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
+  storage.closeTrade(pos.tradeId, fillPx, exitSlip); // V17: pass slippage for P&L sync
+  state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
+  state.dailyPnl = Math.round((state.dailyPnl + closePnl) * 100) / 100;
+
+  // Win/loss stats use the whole trade: final exit plus any T1 partial. A
+  // break-even trade isn't a win, matching the portfolio and trade log.
+  const tradePnl = Math.round((closePnl + (pos.t1Pnl ?? 0)) * 100) / 100;
+  if (tradePnl > 0) {
+    wins++; totalWinAmt += tradePnl;
+    if (!state.bestTrade || tradePnl > state.bestTrade.pnl) {
+      state.bestTrade = { ticker: pos.ticker, pnl: tradePnl, pct: pos.pnlPct };
+    }
+  } else {
+    losses++; totalLossAmt += Math.abs(tradePnl);
+  }
+  pnlHistory.push(tradePnl);
+  cooldowns.set(pos.ticker, state.totalTicks);
+  state.closedTrades++;
+  state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
+  updateStats();
+
+  const icon = closePnl >= 0 ? "✓" : "✗";
+  log(`EXIT ${icon} ${reason.toUpperCase()} | ${pos.ticker} | ${pos.pnlPct >= 0 ? "+" : ""}${pos.pnlPct}% | Net ${closePnl >= 0 ? "+" : "-"}$${Math.abs(closePnl).toFixed(2)} | ${pos.ticksOpen} ticks`);
+}
+
 function enterTrade(sig: BreakoutSignal): ActivePosition | null {
   if (state.circuitBreakerActive) return null;
   if (entryBlockReason(sig.ticker)) return null;
@@ -755,67 +870,28 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
   if (state.openPositions.some(p => p.ticker === sig.ticker)) return null;
   if (pendingEntries.some(p => p.status === "working" && p.sig.ticker === sig.ticker)) return null;
 
-  // V12: Capital recycling — if full AND new signal is A+, close worst position
-  if (state.openPositions.length >= MAX_POSITIONS) {
-    if (sig.grade === "A+") {
-      // Find worst performing open position (most negative PnL %, no T1 hit, closest to MAX_HOLD)
-      const candidates = state.openPositions.filter(p => !p.tier1Hit && p.ticksOpen > 8 && p.pnlPct < 0.5);
-      if (candidates.length > 0) {
-        const worst = candidates.reduce((a, b) => a.pnlPct < b.pnlPct ? a : b);
-        // Force exit the worst performer
-        const mt = worst.marketType;
-        const exitSlip = slippage(worst.sharesRemaining, worst.currentPrice, mt, worst.ticker);
-        const closePnl = Math.round(((worst.currentPrice - worst.entryPrice) * worst.sharesRemaining - exitSlip) * 100) / 100;
-        storage.closeTrade(worst.tradeId, worst.currentPrice, exitSlip); // V17: pass slippage for P&L sync
-        state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
-        state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
-        state.dailyPnl = Math.round((state.dailyPnl + closePnl) * 100) / 100;
-        const tradePnl = closePnl + (worst.t1Pnl ?? 0);
-        if (tradePnl >= 0) { wins++; totalWinAmt += tradePnl; }
-        else { losses++; totalLossAmt += Math.abs(tradePnl); }
-        pnlHistory.push(tradePnl);
-        state.closedTrades++;
-        state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
-        updateStats();
-        cooldowns.set(worst.ticker, state.totalTicks);
-        const idx = state.openPositions.indexOf(worst);
-        if (idx >= 0) state.openPositions.splice(idx, 1);
-        log(`♻️ RECYCLE | Closed ${worst.ticker} (${worst.pnlPct.toFixed(1)}% pnl, ${worst.ticksOpen}t) → making room for A+ ${sig.ticker}`);
-      } else {
-        return null; // No recyclable positions
-      }
-    } else {
-      return null; // Not A+, wait for slot
-    }
-  }
-
   const lastExit = cooldowns.get(sig.ticker) ?? 0;
   if (state.totalTicks - lastExit < COOLDOWN) return null;
 
-  // Audit Page 9 #2: Diversification + forex 12% portfolio cap
+  // Every entry check runs before capital recycling, so a position is only
+  // closed to make room for an entry that will actually be placed. (It used to
+  // close first, then let the cooldown or type limit reject the new entry.)
   const mt = sig.marketType;
-  const sameType = state.openPositions.filter(p => p.marketType === mt).length;
-  if (mt !== "stock" && sameType >= 1) return null;
-  if (mt === "stock" && sameType >= 2) return null;
-
-  // V16 FIX #5: Forex cap raised 12%→15% — AUDUSD has solid FT rate, was undersized
-  if (mt === "forex") {
-    const pv = storage.getPortfolio();
-    const maxForex = pv.totalValue * 0.15;
-    if (sig.positionSize > maxForex) {
-      sig.positionSize = Math.max(1, Math.round(maxForex * 100) / 100);
-      sig.shares = Math.max(0.0001, Math.floor((sig.positionSize / sig.entryPrice) * 10000) / 10000);
-    }
+  let recycle: ActivePosition | null = null;
+  if (state.openPositions.length >= MAX_POSITIONS) {
+    if (sig.grade !== "A+") return null; // not A+, wait for a slot
+    recycle = recycleCandidate(state.openPositions, p => ({ tier1Hit: p.tier1Hit, ticks: p.ticksOpen, pnlPct: p.pnlPct }));
+    if (!recycle) return null; // no recyclable position
   }
+  const remainingTypes = state.openPositions.filter(p => p !== recycle).map(p => p.marketType);
+  if (!typeSlotFree(remainingTypes, mt)) return null;
 
-  // V16 FIX #2: Hard 25% portfolio cap per single position (SOFI was 36% in V15)
-  {
-    const pv = storage.getPortfolio();
-    const maxSingle = pv.totalValue * 0.25;
-    if (sig.positionSize > maxSingle) {
-      sig.positionSize = Math.max(1, Math.round(maxSingle * 100) / 100);
-      sig.shares = Math.max(0.0001, Math.floor((sig.positionSize / sig.entryPrice) * 10000) / 10000);
-    }
+  if (recycle) {
+    const fill = exitFill("recycled", { tp2: recycle.takeProfit2, sellable: sellablePrice(recycle) },
+      price => slippage(recycle!.sharesRemaining, price, recycle!.marketType, recycle!.ticker));
+    log(`♻️ RECYCLE | Closing ${recycle.ticker} (${recycle.pnlPct.toFixed(1)}% pnl, ${recycle.ticksOpen}t) → making room for A+ ${sig.ticker}`);
+    closePosition(recycle, fill.price, fill.cost, "recycled");
+    state.openPositions.splice(state.openPositions.indexOf(recycle), 1);
   }
 
   // Task #49: Submit a pending LIMIT order priced at-or-just-inside the ask
@@ -973,23 +1049,20 @@ function managePositions() {
     pos.pnl = Math.round((pos.currentPrice - pos.entryPrice) * pos.sharesRemaining * 100) / 100;
     pos.pnlPct = Math.round(((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 10000) / 100;
     pos.ticksOpen++;
+    const sellable = sellablePrice(pos);
+    const cost = (price: number, shares = pos.sharesRemaining) => slippage(shares, price, mt, pos.ticker);
 
     // Update high water mark + trailing stop (after T1 only)
     if (pos.currentPrice > pos.highWaterMark) {
       pos.highWaterMark = pos.currentPrice;
-      if (pos.tier1Hit) {
-        const profPct = (pos.highWaterMark - pos.entryPrice) / pos.entryPrice * 100;
-        const tm = profPct > 20 ? 0.5 : profPct > 10 ? 0.7 : TRAIL_MULT;
-        const newTrail = roundPrice(pos.highWaterMark - tm * pos.atr);
-        if (newTrail > pos.trailingStop) pos.trailingStop = newTrail;
-      }
+      pos.trailingStop = raiseTrail({ tier1Hit: pos.tier1Hit, entry: pos.entryPrice, highWaterMark: pos.highWaterMark, atr: pos.atr, trailingStop: pos.trailingStop });
     }
 
-    // Tier 1 partial exit (40% shares)
-    if (!pos.tier1Hit && pos.currentPrice >= pos.takeProfit1) {
+    // Tier 1 partial exit (40% shares): a resting limit sell at T1.
+    if (!pos.tier1Hit && sellable >= pos.takeProfit1) {
       pos.tier1Hit = true;
       const halfSh = Math.round(pos.sharesRemaining * 0.40 * 10000) / 10000;
-      const exitSlip = slippage(halfSh, pos.takeProfit1, mt, pos.ticker);
+      const exitSlip = cost(pos.takeProfit1, halfSh);
       const t1pnl = Math.round(((pos.takeProfit1 - pos.entryPrice) * halfSh - exitSlip) * 100) / 100;
       // Record the partial sale in the DB so the trade log and portfolio cash
       // match the engine; the open row keeps only the remaining shares.
@@ -1003,113 +1076,22 @@ function managePositions() {
       log(`T1 HIT ✓ | ${pos.ticker} | ${t1pnl >= 0 ? "+" : "-"}$${Math.abs(t1pnl).toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${px(pos.takeProfit2)}`);
     }
 
-    // V17 BUG FIX #1: Unified priority exit chain — single evaluation, highest-priority wins
-    // Was: gate logged on line 778, acted on line 785. Other conditions overwrote it silently.
-    // Now: one block, explicit priority order: CB > T2 > MaxHold > Trail > Gate > Momentum
-    const GATE_THRESH_PCT = -0.50;
-    const maxH = pos.tier1Hit ? MAX_HOLD_T1 : MAX_HOLD_NO_T1;
+    const reason = exitReasonFor({
+      price: pos.currentPrice, sellable, entry: pos.entryPrice, trailingStop: pos.trailingStop,
+      tp2: pos.takeProfit2, tier1Hit: pos.tier1Hit, ticks: pos.ticksOpen, rsi: featuresFor(pos.ticker)?.rsi ?? null,
+    }, state.circuitBreakerActive);
+    if (!reason) continue;
 
-    let exitReason = "";
-    let exitStatus: ActivePosition["status"] = "stopped_out";
+    pos.status = reason === "circuit_breaker" ? "circuit_breaker"
+      : reason === "full_target" ? "target_hit"
+      : reason === "momentum_exit" ? "momentum_exit"
+      : "stopped_out";
+    if (reason === "max_hold") maxHoldCount++;
+    if (reason === "gate_exit") log(`⚡ GATE EXIT | ${pos.ticker} | ${pos.pnlPct.toFixed(2)}% @ tick ${pos.ticksOpen} — clearly losing`);
 
-    // Priority 1: Circuit breaker (always wins)
-    if (state.circuitBreakerActive) {
-      exitReason = "circuit_breaker";
-      exitStatus = "circuit_breaker";
-    }
-    // Priority 2: Full target (T2 hit)
-    else if (pos.currentPrice >= pos.takeProfit2) {
-      exitReason = "full_target";
-      exitStatus = "target_hit";
-    }
-    // Priority 3: Max hold time
-    else if (pos.ticksOpen >= maxH) {
-      exitReason = "max_hold";
-      exitStatus = "stopped_out";
-      maxHoldCount++;
-    }
-    // Priority 4: Trailing stop
-    else if (pos.currentPrice <= pos.trailingStop) {
-      exitReason = pos.pnlPct >= 0 ? "trail_lock" : "stopped_out";
-      exitStatus = "stopped_out";
-    }
-    // Priority 5: Momentum gate — only fires on CLEARLY losing positions
-    else if (!pos.tier1Hit && pos.ticksOpen >= 40 && pos.pnlPct < GATE_THRESH_PCT) {
-      exitReason = "gate_exit";
-      exitStatus = "stopped_out";
-      log(`⚡ GATE EXIT | ${pos.ticker} | ${pos.pnlPct.toFixed(2)}% @ tick ${pos.ticksOpen} — clearly losing`);
-    }
-    // Priority 6: RSI momentum collapse
-    else if ((featuresFor(pos.ticker)?.rsi ?? 50) < 35 && pos.pnlPct < -5 && !pos.tier1Hit) {
-      exitReason = "momentum_exit";
-      exitStatus = "momentum_exit";
-    }
-
-    if (exitReason) pos.status = exitStatus;
-
-    if (exitReason) {
-      // Task #49: pick a limit / stop-limit fill price instead of paying
-      // arbitrary market slippage. T1/T2 fills go off at the take-profit
-      // level (already handled for T1 above). Stop-style exits become
-      // stop-limit: if the market gapped past stop * (1 - EXIT_SLIPPAGE_TOL),
-      // we accept the gapped fill at currentPrice; otherwise we fill at the
-      // stop level itself with zero slippage.
-      let fillPx: number;
-      let exitSlip: number;
-      const q = ALPACA_STOCK_TICKERS.has(pos.ticker) ? getAlpacaQuote(pos.ticker) : null;
-      const bid = q && q.bid > 0 ? q.bid : pos.currentPrice;
-
-      if (exitReason === "full_target") {
-        // T2 limit fill at the take-profit price
-        fillPx = pos.takeProfit2;
-        exitSlip = 0;
-      } else if (exitReason === "trail_lock" || exitReason === "stopped_out") {
-        // Stop-limit: fill at stop level if market hasn't gapped past tolerance
-        const stopLimit = pos.trailingStop;
-        const worstFill = stopLimit * (1 - EXIT_SLIPPAGE_TOL);
-        if (bid >= worstFill) {
-          fillPx = stopLimit;
-          exitSlip = 0;
-        } else {
-          // Gapped past stop-limit band — fall back to current price with slippage
-          fillPx = pos.currentPrice;
-          exitSlip = slippage(pos.sharesRemaining, pos.currentPrice, mt, pos.ticker);
-        }
-      } else {
-        // Time-based / momentum / circuit-breaker exits — limit at current bid
-        fillPx = bid;
-        exitSlip = 0;
-      }
-
-      const closePnl = Math.round(((fillPx - pos.entryPrice) * pos.sharesRemaining - exitSlip) * 100) / 100;
-      state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
-      storage.closeTrade(pos.tradeId, fillPx, exitSlip); // V17: pass slippage for P&L sync
-      toClose.push(i);
-
-      state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
-      state.dailyPnl = Math.round((state.dailyPnl + closePnl) * 100) / 100;
-
-      // Win/loss stats use the whole trade: final exit plus any T1 partial.
-      const tradePnl = Math.round((closePnl + (pos.t1Pnl ?? 0)) * 100) / 100;
-      if (tradePnl >= 0) {
-        wins++; totalWinAmt += tradePnl;
-        if (!state.bestTrade || tradePnl > state.bestTrade.pnl) {
-          state.bestTrade = { ticker: pos.ticker, pnl: tradePnl, pct: pos.pnlPct };
-        }
-      } else {
-        losses++; totalLossAmt += Math.abs(tradePnl);
-      }
-
-      cooldowns.set(pos.ticker, state.totalTicks);
-
-      state.closedTrades++;
-      state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
-      updateStats();
-      pnlHistory.push(tradePnl);
-
-      const icon = closePnl >= 0 ? "✓" : "✗";
-      log(`EXIT ${icon} ${exitReason.toUpperCase()} | ${pos.ticker} | ${pos.pnlPct >= 0 ? "+" : ""}${pos.pnlPct}% | Net ${closePnl >= 0 ? "+" : ""}$${closePnl.toFixed(2)} | ${pos.ticksOpen} ticks`);
-    }
+    const fill = exitFill(reason, { tp2: pos.takeProfit2, sellable }, price => cost(price));
+    closePosition(pos, fill.price, fill.cost, reason);
+    toClose.push(i);
   }
 
   for (let i = toClose.length - 1; i >= 0; i--) {
@@ -1273,158 +1255,176 @@ export interface BacktestResult {
   recommendation: string;
 }
 
+/**
+ * Walk-forward backtest on fresh simulated paths: the first 80% of ticks are
+ * in-sample, the rest out-of-sample (a trade counts where it was entered).
+ *
+ * It trades the live strategy with the shared rules above — ranking, grading,
+ * sizing and the risk limit (planEntry), diversification, recycling, the T1
+ * partial, the trailing stop and the exit priority (exitReasonFor / exitFill)
+ * — and keeps real cash: an entry is paid for out of cash, so open positions
+ * can never add up to more than the account. What it leaves out needs calendar
+ * time or a live feed: the daily-loss breaker, market hours and limit-order
+ * repricing (simulated entries always fill on the tick they are placed).
+ */
 export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   const splitAt = Math.floor(totalTicks * 0.8);
   const all = getStockData();
+  const mtOf = (s: StockData) => (s as any).marketType ?? "stock";
 
   const lPrices = new Map<string, PriceState>();
+  const lSeeds = new Map<string, number>();
   for (const s of all) {
-    const h = hashString(s.ticker);
-    lPrices.set(s.ticker, { price: s.price, lcg: h + 54321 });
+    lPrices.set(s.ticker, { price: s.price, lcg: hashString(s.ticker) + 54321 });
+    lSeeds.set(s.ticker, s.price);
   }
-
   const lMTF = new Map<string, number[]>();
   const lCooldowns = new Map<string, number>();
 
+  // Same random walk as advancePrice, on this run's own paths.
   function lAdvance(ticker: string, mt: string): number {
-    const seed = _seeds.get(ticker) ?? getStockByTicker(ticker)?.price ?? 1;
-    const g = lPrices.get(ticker);
-    if (!g) return seed;
+    const g = lPrices.get(ticker)!;
+    const seed = lSeeds.get(ticker)!;
     g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
     const u1 = Math.max(1e-10, g.lcg / 0xffffffff);
     g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
     const u2 = g.lcg / 0xffffffff;
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    const vol = getVol(ticker, mt);
-    g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price * (1 + vol * z)));  // V11: ±80%
-    g.price = roundPrice(g.price);
+    g.price = roundPrice(Math.max(seed * 0.20, Math.min(seed * 1.80, g.price * (1 + getVol(ticker, mt) * z))));
     return g.price;
   }
 
   interface SimPos {
-    ticker: string; mt: string; entry: number; stop: number; tp1: number; tp2: number;
-    shares: number; sharesRem: number; atr: number; tier1Hit: boolean; ticks: number; enteredAt: number;
+    ticker: string; mt: string; entry: number; stop: number; trail: number; tp1: number; tp2: number;
+    hwm: number; sharesRem: number; atr: number; tier1Hit: boolean; ticks: number; enteredAt: number;
+    cur: number; pnlPct: number;
     t1pnl: number; // P&L already realized by the T1 partial; counted into the trade at close
   }
 
   const positions: SimPos[] = [];
-  let bal = STARTING_BALANCE, peak = STARTING_BALANCE, maxDD_IS = 0, maxDD_OOS = 0;
-  let balAtSplit = STARTING_BALANCE;
-  let isW = 0, isL = 0, isWA = 0, isLA = 0, isT = 0, isSl = 0;
-  let oosW = 0, oosL = 0, oosWA = 0, oosLA = 0, oosT = 0, oosSl = 0;
+  let cash = STARTING_BALANCE;
+  const equity = () => cash + positions.reduce((a, p) => a + p.sharesRem * p.cur, 0);
+  let peak = STARTING_BALANCE, maxDD_IS = 0, maxDD_OOS = 0, balAtSplit = STARTING_BALANCE;
+  const record = { wins: 0, losses: 0, totalWin: 0, totalLoss: 0 }; // feeds Kelly sizing
+  const half = { is: { w: 0, l: 0, wa: 0, la: 0, t: 0, sl: 0 }, oos: { w: 0, l: 0, wa: 0, la: 0, t: 0, sl: 0 } };
   const oosTradePnls: number[] = [];
+  const side = (enteredAt: number) => (enteredAt <= splitAt ? half.is : half.oos);
+  const cost = (shares: number, price: number, mt: string) => modelledCost(shares, price, mt);
+
+  function close(pi: number, reason: ExitReason, tick: number) {
+    const pos = positions[pi];
+    const fill = exitFill(reason, { tp2: pos.tp2, sellable: pos.cur }, price => cost(pos.sharesRem, price, pos.mt));
+    const pnl = (fill.price - pos.entry) * pos.sharesRem - fill.cost;
+    cash += fill.price * pos.sharesRem - fill.cost;
+    const tradePnl = pnl + pos.t1pnl;
+    const h = side(pos.enteredAt);
+    h.t++; h.sl += fill.cost;
+    if (tradePnl > 0) { h.w++; h.wa += tradePnl; record.wins++; record.totalWin += tradePnl; }
+    else { h.l++; h.la += Math.abs(tradePnl); record.losses++; record.totalLoss += Math.abs(tradePnl); }
+    if (pos.enteredAt > splitAt) oosTradePnls.push(tradePnl);
+    lCooldowns.set(pos.ticker, tick);
+    positions.splice(pi, 1);
+  }
 
   for (let tick = 1; tick <= totalTicks; tick++) {
-    const inIS = tick <= splitAt;
-
-    for (const s of all) {
-      const mt = (s as any).marketType ?? "stock";
-      sampleHistory(lMTF, s.ticker, lAdvance(s.ticker, mt));
-    }
-
+    // Same periodic re-anchoring of the price bounds as the live tick.
+    if (tick % 400 === 0) for (const [t, g] of lPrices) lSeeds.set(t, g.price);
+    for (const s of all) sampleHistory(lMTF, s.ticker, lAdvance(s.ticker, mtOf(s)));
 
     // Manage positions
     for (let pi = positions.length - 1; pi >= 0; pi--) {
       const pos = positions[pi];
-      const g = lPrices.get(pos.ticker);
-      if (!g) continue;
-      const cur = g.price;
+      pos.cur = lPrices.get(pos.ticker)!.price;
+      pos.pnlPct = (pos.cur - pos.entry) / pos.entry * 100;
       pos.ticks++;
-
-      if (!pos.tier1Hit && cur >= pos.tp1) {
+      if (pos.cur > pos.hwm) {
+        pos.hwm = pos.cur;
+        pos.trail = raiseTrail({ tier1Hit: pos.tier1Hit, entry: pos.entry, highWaterMark: pos.hwm, atr: pos.atr, trailingStop: pos.trail });
+      }
+      if (!pos.tier1Hit && pos.cur >= pos.tp1) {
         pos.tier1Hit = true;
-        const half = pos.sharesRem * 0.40;
-        const sl = slippage(half, pos.tp1, pos.mt);
-        const pnl = (pos.tp1 - pos.entry) * half - sl;
-        bal += pnl;
-        if (pos.enteredAt <= splitAt) isSl += sl; else oosSl += sl;
+        const sh = Math.round(pos.sharesRem * 0.40 * 10000) / 10000;
+        const c = cost(sh, pos.tp1, pos.mt);
+        const pnl = (pos.tp1 - pos.entry) * sh - c;
+        cash += pos.tp1 * sh - c;
+        side(pos.enteredAt).sl += c;
         pos.t1pnl += pnl;
-        pos.sharesRem -= half;
+        pos.sharesRem -= sh;
       }
-
-      const maxH = pos.tier1Hit ? MAX_HOLD_T1 : MAX_HOLD_NO_T1;
-      // V16 FIX #4: Gate in backtest (-0.5% at tick 40) — was missing, caused IS/OOS divergence
-      const btPnlPct = ((cur - pos.entry) / pos.entry) * 100;
-      const btGateHit = !pos.tier1Hit && pos.ticks >= 40 && btPnlPct < -0.50;
-      if (btGateHit || cur <= pos.stop || cur >= pos.tp2 || pos.ticks >= maxH) {
-        const sl = slippage(pos.sharesRem, cur, pos.mt);
-        const pnl = (cur - pos.entry) * pos.sharesRem - sl;
-        bal += pnl;
-        // One result per trade: final exit plus any T1 partial.
-        const tradePnl = pnl + pos.t1pnl;
-        if (pos.enteredAt <= splitAt) {
-          isT++; isSl += sl;
-          if (tradePnl >= 0) { isW++; isWA += tradePnl; } else { isL++; isLA += Math.abs(tradePnl); }
-        } else {
-          oosT++; oosSl += sl;
-          oosTradePnls.push(tradePnl);
-          if (tradePnl >= 0) { oosW++; oosWA += tradePnl; } else { oosL++; oosLA += Math.abs(tradePnl); }
-        }
-        lCooldowns.set(pos.ticker, tick);
-        positions.splice(pi, 1);
-      }
+      const reason = exitReasonFor({
+        price: pos.cur, sellable: pos.cur, entry: pos.entry, trailingStop: pos.trail, tp2: pos.tp2,
+        tier1Hit: pos.tier1Hit, ticks: pos.ticks, rsi: featuresFrom(lMTF.get(pos.ticker) ?? [])?.rsi ?? null,
+      }, false);
+      if (reason) close(pi, reason, tick);
     }
 
-    if (bal > peak) peak = bal;
-    const dd = (peak - bal) / Math.max(peak, 1);
-    if (inIS && dd > maxDD_IS) maxDD_IS = dd;
-    if (!inIS && dd > maxDD_OOS) maxDD_OOS = dd;
-    if (tick === splitAt) balAtSplit = bal;
+    const eq = equity();
+    if (eq > peak) peak = eq;
+    const dd = (peak - eq) / Math.max(peak, 1);
+    if (tick <= splitAt && dd > maxDD_IS) maxDD_IS = dd;
+    if (tick > splitAt && dd > maxDD_OOS) maxDD_OOS = dd;
+    if (tick === splitAt) balAtSplit = eq;
 
-    if (positions.length >= MAX_POSITIONS) continue;
-
-    // Entry: rank by composite score
-    const candidates: Array<{ ticker: string; mt: string; composite: number; price: number; atr: number; stop: number; tp1: number; tp2: number }> = [];
-
+    // Rank and plan entries exactly as scanForBreakouts does.
+    const ranked: Array<{ ticker: string; mt: string; composite: number; price: number; sigma: number }> = [];
     for (const s of all) {
-      if (positions.some(p => p.ticker === s.ticker)) continue;
-      const lc = lCooldowns.get(s.ticker) ?? 0;
-      if (tick - lc < COOLDOWN) continue;
-      const g = lPrices.get(s.ticker);
-      if (!g) continue;
-      const mt = (s as any).marketType ?? "stock";
-
-      // Same features and gates as the live engine, from this run's own paths
       const mh = lMTF.get(s.ticker) ?? [];
       const f = featuresFrom(mh);
       if (!f || !trendGate(mh)) continue;
-
+      const mt = mtOf(s);
       const composite = computeCompositeScore(f, mt);
-      if (!composite || composite < 20) continue;
-
-      const atr  = atrFrom(g.price, f.sigma, getVol(s.ticker, mt));
-      const stop = Math.max(stopFloor(g.price), g.price - STOP_MULT * atr);
-      const tp1  = g.price + TP1_MULT * atr;
-      const tp2  = g.price + TP2_MULT * atr;
-
-      candidates.push({ ticker: s.ticker, mt, composite, price: g.price, atr, stop, tp1, tp2 });
+      if (composite === null || composite < 20) continue;
+      ranked.push({ ticker: s.ticker, mt, composite, price: lPrices.get(s.ticker)!.price, sigma: f.sigma });
     }
+    ranked.sort((a, b) => b.composite - a.composite);
 
-    candidates.sort((a, b) => b.composite - a.composite);
+    const portfolio = { cash, totalValue: eq };
+    if (cash < 1) continue;
+    const signals = ranked.slice(0, 20).map((r, i) => {
+      const grade = gradeFor(i);
+      const atr = atrFrom(r.price, r.sigma, getVol(r.ticker, r.mt));
+      return { ...r, grade, atr, plan: planEntry(r.price, atr, r.composite, grade, r.mt, portfolio, record) };
+    }).filter(sg => sg.plan.posSize >= 0.10);
 
-    for (const cand of candidates.slice(0, 2)) {
-      if (positions.length >= MAX_POSITIONS) break;
-      // Cap position at 95% of available balance (same as live engine)
-      const posSize = Math.min(bal * 0.95, Math.max(bal * POS_MIN_PCT, bal * POS_MAX_PCT));
-      if (posSize < 0.10) continue;
-      const shares = posSize / cand.price;
-      const sl = slippage(shares, cand.price, cand.mt);
-      // Match live engine: bake entry slippage into the adjusted entry price
-      // (do NOT also subtract from balance — that would double-count slippage)
-      const adjEntry = cand.price + sl / Math.max(shares, 0.0001);
-      if (inIS) isSl += sl; else oosSl += sl;
+    // Entry loop: same limits and checks as autoTraderTick / enterTrade.
+    const maxEnter = eq >= 150 ? 2 : 1;
+    let entered = 0;
+    for (const sg of signals.slice(0, 6)) {
+      if (entered >= maxEnter) break;
+      if (cash < sg.plan.posSize) continue;
+      if (positions.some(p => p.ticker === sg.ticker)) continue;
+      if (tick - (lCooldowns.get(sg.ticker) ?? 0) < COOLDOWN) continue;
+      let recycleIdx = -1;
+      if (positions.length >= MAX_POSITIONS) {
+        if (sg.grade !== "A+") continue;
+        const worst = recycleCandidate(positions, p => ({ tier1Hit: p.tier1Hit, ticks: p.ticks, pnlPct: p.pnlPct }));
+        if (!worst) continue;
+        recycleIdx = positions.indexOf(worst);
+      }
+      if (!typeSlotFree(positions.filter((_, i) => i !== recycleIdx).map(p => p.mt), sg.mt)) continue;
+      if (recycleIdx >= 0) close(recycleIdx, "recycled", tick);
+
+      const { shares } = sg.plan;
+      const c = cost(shares, sg.price, sg.mt);
+      const fillPrice = roundPrice(sg.price + c / shares);
+      if (fillPrice * shares > cash) continue;
+      cash -= fillPrice * shares;
+      side(tick).sl += c;
+      // Exits keep their distances from the cost-adjusted fill, as live.
+      const shift = fillPrice - sg.price;
+      const stop = Math.max(stopFloor(fillPrice), roundPrice(sg.plan.stop + shift));
       positions.push({
-        ticker: cand.ticker, mt: cand.mt,
-        entry: adjEntry,
-        // Exits relative to the cost-adjusted entry, as in the live engine.
-        stop: cand.stop + (adjEntry - cand.price),
-        tp1: cand.tp1 + (adjEntry - cand.price),
-        tp2: cand.tp2 + (adjEntry - cand.price),
-        shares, sharesRem: shares, atr: cand.atr,
-        tier1Hit: false, ticks: 0, enteredAt: tick, t1pnl: 0,
+        ticker: sg.ticker, mt: sg.mt, entry: fillPrice, stop, trail: stop,
+        tp1: roundPrice(sg.plan.tp1 + shift), tp2: roundPrice(sg.plan.tp2 + shift),
+        hwm: fillPrice, sharesRem: shares, atr: sg.atr, tier1Hit: false, ticks: 0, enteredAt: tick,
+        cur: sg.price, pnlPct: 0, t1pnl: 0,
       });
+      entered++;
     }
   }
+  const bal = equity();
+  const [isW, isL, isWA, isLA, isT, isSl] = [half.is.w, half.is.l, half.is.wa, half.is.la, half.is.t, half.is.sl];
+  const [oosW, oosL, oosWA, oosLA, oosT, oosSl] = [half.oos.w, half.oos.l, half.oos.wa, half.oos.la, half.oos.t, half.oos.sl];
 
   function mk(tks: number, trades: number, w: number, l: number, wa: number, la: number, sl: number, startB: number, endB: number, maxDD: number) {
     const pf = la > 0 ? Math.round((wa / la) * 100) / 100 : wa > 0 ? 99 : 0;
@@ -1492,7 +1492,6 @@ export function startAutoTrader() {
   _prices.clear();
   _seeds.clear();
   _mtf.clear();
-  _hotTickers.clear();
   cooldowns.clear();
   pendingEntries.length = 0; // Task #49: drop any stale working limits across restarts
   t1HitCount = 0;
@@ -1857,7 +1856,7 @@ export function resetAutoTraderState() {
 
   // Clear simulation maps
   _prices.clear(); _seeds.clear(); _mtf.clear();
-  _hotTickers.clear(); cooldowns.clear();
+  cooldowns.clear();
   pendingEntries.length = 0; // Task #49: drop pending limits on full reset
 
   // Reset daily tracking

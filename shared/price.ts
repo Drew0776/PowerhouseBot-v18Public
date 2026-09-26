@@ -20,3 +20,11 @@ export function formatPrice(p: number | null | undefined, dp = 2): string {
   if (p === 0) return (0).toFixed(dp);
   return Number(p.toPrecision(4)).toString();
 }
+
+/** Signed dollar amount with the sign before the "$": +$1.20, -$1.20, $0.00. */
+export function signedUsd(n: number | null | undefined, dp = 2): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const v = Number(n.toFixed(dp));
+  if (v === 0) return `$${(0).toFixed(dp)}`;
+  return `${v > 0 ? "+" : "-"}$${Math.abs(v).toFixed(dp)}`;
+}

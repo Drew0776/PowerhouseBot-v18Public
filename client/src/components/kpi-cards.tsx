@@ -1,4 +1,5 @@
 import type { PortfolioSummary } from "@shared/schema";
+import { signedUsd } from "@shared/price";
 import { DollarSign, TrendingUp, TrendingDown, Target, Briefcase, Shield } from "lucide-react";
 
 function KpiCard({ label, value, subValue, icon: Icon, color }: {
@@ -38,14 +39,14 @@ export default function KpiCards({ portfolio }: { portfolio: PortfolioSummary })
       />
       <KpiCard
         label="Day P&L"
-        value={`${portfolio.dayPnl >= 0 ? "+" : ""}$${portfolio.dayPnl.toFixed(2)}`}
+        value={signedUsd(portfolio.dayPnl)}
         subValue={`${portfolio.dayPnlPercent >= 0 ? "+" : ""}${portfolio.dayPnlPercent.toFixed(2)}%`}
         icon={portfolio.dayPnl >= 0 ? TrendingUp : TrendingDown}
         color={dayColor}
       />
       <KpiCard
         label="Total P&L"
-        value={`${portfolio.totalPnl >= 0 ? "+" : ""}$${portfolio.totalPnl.toFixed(2)}`}
+        value={signedUsd(portfolio.totalPnl)}
         subValue={`${portfolio.totalPnlPercent >= 0 ? "+" : ""}${portfolio.totalPnlPercent.toFixed(2)}%`}
         icon={portfolio.totalPnl >= 0 ? TrendingUp : TrendingDown}
         color={totalColor}

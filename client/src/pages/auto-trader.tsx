@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { formatPrice } from "@shared/price";
+import { formatPrice, signedUsd } from "@shared/price";
 import { STARTING_BALANCE } from "@shared/constants";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -640,7 +640,7 @@ function MiniEquityCurve() {
           className="font-mono text-xs font-bold"
           style={{ color: isAbove ? "#00e676" : "#ff1744" }}
         >
-          {currentVal >= startVal ? "+" : ""}${fmt(currentVal - startVal)} (
+          {signedUsd(currentVal - startVal)} (
           {currentVal >= startVal ? "+" : ""}
           {fmt(((currentVal - startVal) / startVal) * 100)}%)
         </span>
@@ -1058,7 +1058,7 @@ function PositionsTable({ positions }: { positions: ActivePosition[] }) {
 
             <div className="flex flex-col items-end self-center gap-0.5">
               <span className={`font-mono text-xs font-semibold ${pnlColor(pos.pnl)}`}>
-                {pos.pnl >= 0 ? "+" : ""}${fmt(pos.pnl)}
+                {signedUsd(pos.pnl)}
               </span>
               {/* Progress bar entry → target */}
               <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
@@ -1586,7 +1586,7 @@ export default function AutoTraderPage() {
           />
           <KpiCard
             label="Total P&L"
-            value={`${pnlValue >= 0 ? "+" : ""}$${fmt(pnlValue)}`}
+            value={signedUsd(pnlValue)}
             icon={pnlValue >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
             color={pnlColor(pnlValue)}
           />

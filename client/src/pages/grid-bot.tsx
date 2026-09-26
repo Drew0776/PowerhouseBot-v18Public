@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { useToast } from "@/hooks/use-toast";
 import type { GridBot, GridBotSummary, GridLevel, GridOrder } from "@shared/schema";
+import { signedUsd } from "@shared/price";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,7 +23,7 @@ function pnlColor(n: number) {
 }
 
 function statusBadge(status: string) {
-  if (status === "active") return <Badge className="bg-[#00e676]/20 text-[#00e676] border-[#00e676]/30 text-[10px] px-1.5 py-0">LIVE</Badge>;
+  if (status === "active") return <Badge className="bg-[#00e676]/20 text-[#00e676] border-[#00e676]/30 text-[10px] px-1.5 py-0">RUNNING</Badge>;
   if (status === "paused") return <Badge className="bg-yellow-400/20 text-yellow-400 border-yellow-400/30 text-[10px] px-1.5 py-0">PAUSED</Badge>;
   if (status === "paused_by_breaker") return <Badge data-testid="badge-paused-by-breaker" className="bg-red-500/20 text-red-400 border-red-500/40 text-[10px] px-1.5 py-0" title="Global drawdown circuit breaker tripped — bot flattened all positions and will auto-resume once portfolio recovers">⚠ BREAKER</Badge>;
   if (status === "stopped_range_exit") return <Badge data-testid="badge-exited-range" className="bg-amber-500/20 text-amber-400 border-amber-500/40 text-[10px] px-1.5 py-0" title="Price exited the configured grid range — bot auto-closed all open positions">EXITED RANGE</Badge>;
@@ -105,7 +106,7 @@ function GridVisualizer({ summary }: GridVisualizerProps) {
 
               {/* P&L - hidden on mobile, shown as combined action column */}
               <span className={`hidden md:block font-mono text-xs text-right relative z-10 ${pnlColor(lvl.pnl)}`}>
-                {lvl.pnl !== 0 ? `$${fmt(Math.abs(lvl.pnl))}` : "—"}
+                {lvl.pnl !== 0 ? signedUsd(lvl.pnl) : "—"}
               </span>
               {/* Mobile: compact action/pnl combined */}
               <div className="flex md:hidden justify-end relative z-10">
@@ -539,7 +540,7 @@ function BotCard({ bot, selected, onClick }: BotCardProps) {
         <div>
           <p className="text-[10px] text-zinc-500">Realized P&L</p>
           <p className={`font-mono text-xs font-semibold ${pnlColor(bot.realizedPnl)}`}>
-            {bot.realizedPnl >= 0 ? "+" : ""}${fmt(bot.realizedPnl)}
+            {signedUsd(bot.realizedPnl)}
           </p>
         </div>
         <div>
@@ -585,7 +586,7 @@ function OrderHistory({ orders }: { orders: GridOrder[] }) {
           <span className="text-right text-zinc-300">{o.shares.toFixed(4)}</span>
           <span className="text-right text-zinc-300">${fmt(o.total)}</span>
           <span className={`text-right ${pnlColor(o.pnl ?? 0)}`}>
-            {o.pnl !== null && o.pnl !== undefined ? `+$${fmt(o.pnl)}` : "—"}
+            {o.pnl !== null && o.pnl !== undefined ? signedUsd(o.pnl) : "—"}
           </span>
         </div>
       ))}
@@ -641,7 +642,7 @@ export default function GridBotPage() {
         const o = data.order;
         toast({
           title: `Grid Fill: ${o.action.toUpperCase()} ${o.ticker}`,
-          description: `Level ${o.level} · ${o.shares.toFixed(4)} shares @ $${fmt(o.fillPrice)}${o.pnl ? ` · +$${fmt(o.pnl)} profit` : ""}`,
+          description: `Level ${o.level} · ${o.shares.toFixed(4)} shares @ $${fmt(o.fillPrice)}${o.pnl ? ` · ${signedUsd(o.pnl)} ${o.pnl > 0 ? "profit" : "loss"}` : ""}`,
         });
       }
     },
@@ -707,7 +708,7 @@ export default function GridBotPage() {
               <div className="text-center">
                 <p className="text-[10px] text-zinc-500 uppercase">Total P&L</p>
                 <p className={`font-mono text-sm font-bold ${pnlColor(bots.reduce((a, b) => a + b.realizedPnl, 0))}`}>
-                  ${fmt(bots.reduce((a, b) => a + b.realizedPnl, 0))}
+                  {signedUsd(bots.reduce((a, b) => a + b.realizedPnl, 0))}
                 </p>
               </div>
             </div>
@@ -840,10 +841,10 @@ export default function GridBotPage() {
               {/* KPI Row */}
               <div className="grid grid-cols-2 gap-2.5">
                 {[
-                  { label: "Current Price", value: `$${fmt(summary.currentPrice)}`, color: "text-white" },
-                  { label: "Realized P&L", value: `${summary.bot.realizedPnl >= 0 ? "+" : ""}$${fmt(summary.bot.realizedPnl)}`, color: pnlColor(summary.bot.realizedPnl) },
-                  { label: "Unrealized P&L", value: `${summary.unrealizedPnl >= 0 ? "+" : ""}$${fmt(summary.unrealizedPnl)}`, color: pnlColor(summary.unrealizedPnl) },
-                  { label: "Total P&L", value: `${summary.totalPnl >= 0 ? "+" : ""}$${fmt(summary.totalPnl)}`, color: pnlColor(summary.totalPnl) },
+                  { label: summary.priceIsLive ? "Current Price · live" : "Current Price · simulated", value: `$${fmt(summary.currentPrice)}`, color: "text-white" },
+                  { label: "Realized P&L", value: signedUsd(summary.bot.realizedPnl), color: pnlColor(summary.bot.realizedPnl) },
+                  { label: "Unrealized P&L", value: signedUsd(summary.unrealizedPnl), color: pnlColor(summary.unrealizedPnl) },
+                  { label: "Total P&L", value: signedUsd(summary.totalPnl), color: pnlColor(summary.totalPnl) },
                   { label: "Grid Fills", value: `${summary.bot.totalGridFills}`, color: "text-[#00bcd4]" },
                   { label: "Investment", value: `$${fmt(summary.bot.totalInvestment)}`, color: "text-zinc-300" },
                   { label: "Profit/Grid", value: `${fmt(summary.bot.profitPerGrid)}%`, color: "text-[#00e676]" },

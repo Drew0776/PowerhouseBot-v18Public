@@ -1,4 +1,4 @@
-import type { StockData, DailyCandle, AnalystAction, CatalystEvent, StockCategory, MarketStatus, OptionsFlowRow } from "@shared/schema";
+import type { StockData, DailyCandle, AnalystAction, CatalystEvent, StockCategory, OptionsFlowRow } from "@shared/schema";
 import { roundPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
 
@@ -670,29 +670,3 @@ export function generateOptionsFlow(stocks: StockData[], rand: () => number): Op
   return flows.sort((a, b) => b.flowScore - a.flowScore).map((f, i) => ({ ...f, rank: i + 1 }));
 }
 
-export function generateMarketStatus(rand: () => number): MarketStatus {
-  const sp500Price = 5250 + Math.round((rand() - 0.5) * 200);
-  const sp500Change = Math.round((rand() - 0.45) * 50 * 100) / 100;
-  const sp500ChangePct = Math.round((sp500Change / sp500Price) * 10000) / 100;
-  const vix = Math.round((14 + rand() * 18) * 10) / 10;
-  const fearGreed = Math.round(30 + rand() * 50);
-  const bitcoin = Math.round(62000 + (rand() - 0.5) * 8000);
-
-  let sentiment: "Bullish" | "Bearish" | "Uncertain" = "Uncertain";
-  if (fearGreed > 60 && sp500ChangePct > 0) sentiment = "Bullish";
-  else if (fearGreed < 35 || sp500ChangePct < -0.5) sentiment = "Bearish";
-
-  // Market close time = 4:00 PM EST today
-  const now = new Date();
-  const closeTime = new Date(now);
-  closeTime.setHours(16, 0, 0, 0);
-
-  return {
-    sentiment,
-    sp500: { price: sp500Price, change: sp500Change, changePercent: sp500ChangePct },
-    vix,
-    fearGreed,
-    bitcoin,
-    marketCloseTime: closeTime.toISOString(),
-  };
-}

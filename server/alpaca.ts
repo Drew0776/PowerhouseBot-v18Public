@@ -43,7 +43,7 @@ interface PriceEntry {
   price: number;
   bid: number;
   ask: number;
-  fetchedAt: number; // ms timestamp
+  fetchedAt: number; // ms: when the quote was made (Alpaca's timestamp), not when we received it
   source: "ws" | "rest";
 }
 
@@ -55,7 +55,7 @@ let alpacaError = "";
 
 // ── Reconnect / backoff state (shared shape for REST + WS) ────────────────────
 const HEALTHY_POLL_MS    = 15_000;   // REST cadence when no WS
-const HEARTBEAT_POLL_MS  = 60_000;   // REST cadence when WS is healthy (just a sanity check)
+const REQUEST_TIMEOUT_MS = 10_000;   // abort a hung Alpaca request
 const STALE_THRESHOLD    = 30_000;   // prices older than this are considered stale
 const BACKOFF_BASE_MS    = 1_000;    // initial retry delay (1s)
 const BACKOFF_MAX_MS     = 60_000;   // cap retry delay (60s)
@@ -174,12 +174,13 @@ async function fetchChunk(tickers: string[]): Promise<number> {
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET,
       },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!res.ok) {
       alpacaError = `HTTP ${res.status}`;
       return 0;
     }
-    const data = await res.json() as { quotes?: Record<string, { bp: number; ap: number }> };
+    const data = await res.json() as { quotes?: Record<string, { bp: number; ap: number; t?: string }> };
     const quotes = data.quotes ?? {};
     const now = Date.now();
     let cached = 0;
@@ -190,11 +191,14 @@ async function fetchChunk(tickers: string[]): Promise<number> {
       const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
       if (mid > 0) {
         // Don't clobber a fresher WS price with a stale REST quote.
+        // "Latest quote" can be minutes or hours old on a quiet IEX book, so
+        // freshness is judged from the quote's own time, not the fetch time.
+        const quotedAt = quoteTime(q.t, now);
         const existing = priceCache.get(ticker);
-        if (existing && existing.source === "ws" && (now - existing.fetchedAt) < STALE_THRESHOLD) {
-          // keep WS price
+        if (existing && existing.fetchedAt >= quotedAt) {
+          // keep the newer price we already have (usually from the WS)
         } else {
-          priceCache.set(ticker, { price: mid, bid, ask, fetchedAt: now, source: "rest" });
+          priceCache.set(ticker, { price: mid, bid, ask, fetchedAt: quotedAt, source: "rest" });
           if (_onPriceUpdate) _onPriceUpdate(ticker, mid);
         }
         cached++;
@@ -205,6 +209,12 @@ async function fetchChunk(tickers: string[]): Promise<number> {
     alpacaError = err instanceof Error ? err.message : String(err);
     return 0;
   }
+}
+
+/** Alpaca's RFC 3339 quote time in ms, never later than `now` (clock skew). */
+function quoteTime(t: string | undefined, now: number): number {
+  const ms = t ? Date.parse(t) : NaN;
+  return Number.isFinite(ms) ? Math.min(ms, now) : now;
 }
 
 // Serialize refreshes so manual /api/alpaca/refresh and the scheduled cycle
@@ -295,10 +305,10 @@ function scheduleNextRefresh(): void {
   let delay: number;
   if (consecutiveFailures > 0) {
     delay = computeBackoffMs(consecutiveFailures);
-  } else if (isWsHealthy()) {
-    // WS is the primary feed — REST just needs to heartbeat the account/quote endpoint
-    delay = HEARTBEAT_POLL_MS;
   } else {
+    // Same cadence with or without the WS: the free WS carries only
+    // WS_SUB_LIMIT symbols, so the rest depend on REST. (A 60 s cadence while
+    // the WS was up left those quotes past the 30 s stale limit half the time.)
     delay = HEALTHY_POLL_MS;
   }
   nextRetryAt = Date.now() + delay;
@@ -494,7 +504,7 @@ function handleWsItem(item: unknown): void {
     const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
     if (mid > 0) {
       const now = Date.now();
-      priceCache.set(q.S, { price: mid, bid, ask, fetchedAt: now, source: "ws" });
+      priceCache.set(q.S, { price: mid, bid, ask, fetchedAt: quoteTime(q.t, now), source: "ws" });
       lastSuccessfulFetch = now;
       alpacaConnected = true;
       if (_onPriceUpdate) _onPriceUpdate(q.S, mid);
@@ -512,7 +522,7 @@ function handleWsItem(item: unknown): void {
       price: t.p,
       bid: prev?.bid ?? t.p,
       ask: prev?.ask ?? t.p,
-      fetchedAt: now,
+      fetchedAt: quoteTime(t.t, now),
       source: "ws",
     });
     lastSuccessfulFetch = now;
@@ -550,12 +560,24 @@ export async function getAlpacaAccount(): Promise<{
   cash: number;
   buyingPower: number;
 } | null> {
+  if (!isAlpacaConfigured()) return null; // no keys: nothing to ask for
+  // The dashboard polls this every few seconds; one request per 30 s is plenty.
+  if (Date.now() - accountCache.at < 30_000) return accountCache.value;
+  const value = await fetchAccount();
+  accountCache = { at: Date.now(), value };
+  return value;
+}
+
+let accountCache: { at: number; value: Awaited<ReturnType<typeof getAlpacaAccount>> } = { at: 0, value: null };
+
+async function fetchAccount(): Promise<{ status: string; portfolioValue: number; cash: number; buyingPower: number } | null> {
   try {
     const res = await fetch(`${PAPER_BASE}/account`, {
       headers: {
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET,
       },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const d = await res.json() as {

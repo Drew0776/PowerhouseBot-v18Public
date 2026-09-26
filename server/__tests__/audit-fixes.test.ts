@@ -150,7 +150,10 @@ test("grid reserve is valued from grid P&L and settled into cash on stop", () =>
 
   const stopped = stopGridBot(bot.id)!;
   assert.equal(stopped.status, "stopped");
-  assert.equal(Math.round(getGridBot(bot.id)!.realizedPnl * 100), Math.round(expectedPnl * 100));
+  // Stopping flattens the open buy with a market sell, which pays the half-spread.
+  const mt = (getStockByTicker(ticker) as { marketType?: string }).marketType ?? "stock";
+  const flattenCost = autoTraderMod.modelledCost(2, getGridPrice(ticker), mt);
+  assert.equal(Math.round(getGridBot(bot.id)!.realizedPnl * 100), Math.round((expectedPnl - flattenCost) * 100));
 
   const settled = storage.getTrades().find(x => x.id === reserve.id)!;
   assert.equal(settled.status, "closed");

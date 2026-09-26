@@ -240,13 +240,17 @@ export interface OptionsFlowRow {
   signal: "BUY" | "SELL" | "HOLD";
 }
 
+/** A price in the market bar: a live Alpaca quote, or the simulator's price. */
+export interface MarketQuote {
+  symbol: string;
+  price: number;
+  live: boolean;
+}
+
 export interface MarketStatus {
-  sentiment: "Bullish" | "Bearish" | "Uncertain";
-  sp500: { price: number; change: number; changePercent: number };
-  vix: number;
-  fearGreed: number; // 0-100
-  bitcoin: number;
-  marketCloseTime: string;
+  sessionOpen: boolean;       // US regular session (market-calendar.ts)
+  nextSessionChange: string;  // ISO time of the next close (if open) or open
+  quotes: MarketQuote[];
 }
 
 export interface UserSettings {
@@ -351,6 +355,7 @@ export interface GridBotSummary {
   unrealizedPnl: number;
   totalPnl: number;
   currentPrice: number;
+  priceIsLive: boolean; // live Alpaca quote, else the grid simulator's price
   activeLevel: number; // which level is current price at
 }
 
