@@ -324,7 +324,7 @@ function VelocityPanel({ autoState, portfolio }: { autoState: AutoTraderState | 
 
   const metrics = [
     { label: "Session ROI", value: (roi >= 0 ? "+" : "") + roi.toFixed(2) + "%", color: roi >= 0 ? "#00e676" : "#ff5555" },
-    { label: "P&L / Tick", value: (pnlPerTick >= 0 ? "+" : "") + "$" + Math.abs(pnlPerTick).toFixed(4), color: pnlPerTick >= 0 ? "#00e676" : "#ff5555" },
+    { label: "P&L / Tick", value: (pnlPerTick >= 0 ? "+" : "-") + "$" + Math.abs(pnlPerTick).toFixed(4), color: pnlPerTick >= 0 ? "#00e676" : "#ff5555" },
     { label: "Capital Used", value: capUtil + "%", color: capUtil >= 70 ? "#00e676" : capUtil >= 40 ? "#fbbf24" : "#ff9800" },
     { label: "T1 Hit Rate", value: t1Rate + "%", color: t1Rate >= 60 ? "#00e676" : t1Rate >= 40 ? "#fbbf24" : "#ff5555" },
     { label: "MAX_HOLD %", value: maxHoldRate + "%", color: maxHoldRate <= 20 ? "#00e676" : maxHoldRate <= 40 ? "#fbbf24" : "#ff5555" },
