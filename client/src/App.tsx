@@ -51,7 +51,11 @@ function AppRouter() {
 
   return (
     <Switch>
-      <Route path="/login" component={Login} />
+      {/* Leaving /login is decided here, from this render's auth state. Navigating
+          imperatively from the login page raced React Query: the router re-rendered
+          before AppRouter saw the new auth data, and the stale <Redirect> below
+          bounced the user straight back to /login. */}
+      <Route path="/login">{isAuthenticated ? <Redirect to="/" /> : <Login />}</Route>
       <Route>
         {isAuthenticated ? <AuthenticatedApp /> : <Redirect to="/login" />}
       </Route>

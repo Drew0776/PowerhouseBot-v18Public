@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { STARTING_BALANCE } from "@shared/constants";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
@@ -599,7 +600,7 @@ function MiniEquityCurve() {
   });
 
   const points = Array.isArray(curveData) && curveData.length > 0 ? curveData : [];
-  const startVal = 100;
+  const startVal = STARTING_BALANCE;
   const currentVal = points.length > 0 ? points[points.length - 1].value : startVal;
   const isAbove = currentVal >= startVal;
   const fillColor = isAbove ? "#00e676" : "#ff1744";
@@ -1285,6 +1286,9 @@ export default function AutoTraderPage() {
       const r = await apiRequest("GET", "/api/portfolio");
       return r.json();
     },
+    // Poll alongside the engine state; without this, cash stayed at the
+    // value fetched on page load while the engine was trading.
+    refetchInterval: 2000,
   });
 
   // ── Start mutation ──
@@ -1521,7 +1525,7 @@ export default function AutoTraderPage() {
                   size="sm"
                   variant="outline"
                   className="h-7 text-[11px] border-red-900/40 text-zinc-500 hover:text-[#ff5555] hover:border-red-700/50 font-mono gap-1.5 px-3"
-                  title="Reset portfolio to the $500 starting balance (stop engine first)"
+                  title={`Reset portfolio to the $${STARTING_BALANCE} starting balance (stop engine first)`}
                 >
                   RESET
                 </Button>
@@ -1530,7 +1534,7 @@ export default function AutoTraderPage() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>Reset Portfolio?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    This will delete all trades and reset your portfolio to the $500 starting balance. This cannot be undone.
+                    This will delete all trades and reset your portfolio to the ${STARTING_BALANCE} starting balance. This cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

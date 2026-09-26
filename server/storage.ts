@@ -65,7 +65,8 @@ try {
   sqlite.exec(`ALTER TABLE trades ADD COLUMN take_profit REAL`);
 } catch (_) { /* column already exists */ }
 
-export const STARTING_BALANCE = 500;
+import { STARTING_BALANCE } from "@shared/constants";
+export { STARTING_BALANCE };
 const EQUITY_CURVE_MAX_POINTS = 5000; // V17: raised from $100 — realistic position sizing (was too tight)
 
 // Cache stock data (generated once at startup)

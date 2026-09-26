@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { STARTING_BALANCE } from "@shared/constants";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import type { PortfolioSummary, GridBot } from "@shared/schema";
 import KpiCards from "@/components/kpi-cards";
@@ -297,8 +298,8 @@ export default function Dashboard() {
   const openPositions = autoState?.openPositions ?? [];
   const isRunning = autoState?.isRunning ?? false;
   const regime = autoState?.regime ?? "unknown";
-  const portfolioValue = portfolio?.totalValue ?? 100;
-  const totalReturn = ((portfolioValue - 100) / 100) * 100;
+  const portfolioValue = portfolio?.totalValue ?? STARTING_BALANCE;
+  const totalReturn = ((portfolioValue - STARTING_BALANCE) / STARTING_BALANCE) * 100;
 
   return (
     <div className="flex flex-col">
@@ -400,7 +401,7 @@ export default function Dashboard() {
                   <StatCard
                     label="Total Return"
                     value={totalTrades === 0 ? "—" : `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%`}
-                    sub={totalTrades === 0 ? "no trades yet" : `$${(portfolioValue - 100).toFixed(2)} profit`}
+                    sub={totalTrades === 0 ? "no trades yet" : `$${(portfolioValue - STARTING_BALANCE).toFixed(2)} profit`}
                     color={totalTrades === 0 ? "#9e9e9e" : pnlColor(totalReturn)}
                   />
                   <StatCard

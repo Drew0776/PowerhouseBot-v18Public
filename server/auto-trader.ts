@@ -834,10 +834,19 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   if (total > portfolio.cash) { cancelPending(pending, "insufficient_cash"); return null; }
   state.totalSlippageCost = Math.round((state.totalSlippageCost + entrySlip) * 10000) / 10000;
 
+  // Place exits relative to the actual fill (ask + entry costs), not the
+  // signal's mid, keeping their ATR distances. Anchored to the mid, T1 could
+  // sit below break-even once costs are charged and "lock in" a loss.
+  const shift = fillPrice - sig.entryPrice;
+  const at = (px: number) => Math.max(0.0001, Math.round((px + shift) * 10000) / 10000);
+  const stopLoss = at(sig.stopLoss);
+  const takeProfit1 = at(sig.takeProfit1);
+  const takeProfit2 = at(sig.takeProfit2);
+
   const trade = storage.createTrade({
     ticker: sig.ticker, action: "buy", shares: sig.shares,
     price: fillPrice, total,
-    stopLoss: sig.stopLoss, takeProfit: sig.takeProfit2,
+    stopLoss, takeProfit: takeProfit2,
     openedAt: new Date().toISOString(),
   });
 
@@ -845,8 +854,8 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
     tradeId: trade.id, ticker: sig.ticker,
     entryPrice: fillPrice, currentPrice: fillPrice,
     shares: sig.shares, sharesRemaining: sig.shares,
-    stopLoss: sig.stopLoss, trailingStop: sig.stopLoss,
-    takeProfit1: sig.takeProfit1, takeProfit2: sig.takeProfit2,
+    stopLoss, trailingStop: stopLoss,
+    takeProfit1, takeProfit2,
     highWaterMark: fillPrice, pnl: 0, pnlPct: 0,
     strategy: sig.strategy, grade: sig.grade,
     enteredAt: new Date().toISOString(),
@@ -858,7 +867,7 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   state.totalTrades++;
   pending.status = "filled";
 
-  log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${fillPrice.toFixed(4)} (limit $${pending.limitPrice.toFixed(4)}) | Stop $${sig.stopLoss.toFixed(4)} | T1 $${sig.takeProfit1.toFixed(4)} | Score ${sig.score}`);
+  log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${curPrice.toFixed(4)} (limit $${pending.limitPrice.toFixed(4)}; $${fillPrice.toFixed(4)} incl. costs) | Stop $${stopLoss.toFixed(4)} | T1 $${takeProfit1.toFixed(4)} | Score ${sig.score}`);
   return pos;
 }
 
@@ -953,7 +962,7 @@ function managePositions() {
       state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
       pos.t1Pnl = t1pnl;
       t1HitCount++;
-      log(`T1 HIT ✓ | ${pos.ticker} | +$${t1pnl.toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${pos.takeProfit2.toFixed(4)}`);
+      log(`T1 HIT ✓ | ${pos.ticker} | ${t1pnl >= 0 ? "+" : "-"}$${Math.abs(t1pnl).toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${pos.takeProfit2.toFixed(4)}`);
     }
 
     // V17 BUG FIX #1: Unified priority exit chain — single evaluation, highest-priority wins
@@ -1371,7 +1380,10 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
       positions.push({
         ticker: cand.ticker, mt: cand.mt,
         entry: adjEntry,
-        stop: cand.stop, tp1: cand.tp1, tp2: cand.tp2,
+        // Exits relative to the cost-adjusted entry, as in the live engine.
+        stop: cand.stop + (adjEntry - cand.price),
+        tp1: cand.tp1 + (adjEntry - cand.price),
+        tp2: cand.tp2 + (adjEntry - cand.price),
         shares, sharesRem: shares, atr: cand.atr,
         tier1Hit: false, ticks: 0, enteredAt: tick,
       });
