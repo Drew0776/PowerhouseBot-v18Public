@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { STARTING_BALANCE } from "@shared/constants";
-import { formatPrice } from "@shared/price";
+import { formatPrice, signedUsd } from "@shared/price";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import type { PortfolioSummary, GridBot } from "@shared/schema";
 import KpiCards from "@/components/kpi-cards";
@@ -160,7 +160,7 @@ function OpenPnlHero({ portfolio, autoState }: { portfolio: PortfolioSummary | u
   return (
     <HeroCard
       label="Open P&L"
-      value={`${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)}`}
+      value={signedUsd(openPnl)}
       sub={count === 0 ? "no open positions" : `${count} open position${count === 1 ? "" : "s"}`}
       color={count === 0 ? "#9e9e9e" : pnlColor(openPnl)}
       icon={TrendingUp}
@@ -300,8 +300,12 @@ export default function Dashboard() {
   const openPositions = autoState?.openPositions ?? [];
   const isRunning = autoState?.isRunning ?? false;
   const regime = autoState?.regime ?? "unknown";
-  const portfolioValue = portfolio?.totalValue ?? STARTING_BALANCE;
-  const totalReturn = ((portfolioValue - STARTING_BALANCE) / STARTING_BALANCE) * 100;
+  // "Bot performance" is the auto-trader's own record. (The return card used
+  // the whole account, grid bots included, next to auto-trader-only profit
+  // factor and expectancy.)
+  const closedTrades = autoState?.closedTrades ?? 0;
+  const botPnl = autoState?.totalPnl ?? 0;
+  const botReturn = (botPnl / STARTING_BALANCE) * 100;
 
   return (
     <div className="flex flex-col">
@@ -401,16 +405,16 @@ export default function Dashboard() {
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
                   <StatCard
-                    label="Total Return"
-                    value={totalTrades === 0 ? "—" : `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(2)}%`}
-                    sub={totalTrades === 0 ? "no trades yet" : `$${(portfolioValue - STARTING_BALANCE).toFixed(2)} profit`}
-                    color={totalTrades === 0 ? "#9e9e9e" : pnlColor(totalReturn)}
+                    label="Auto-trader P&L"
+                    value={totalTrades === 0 ? "—" : signedUsd(botPnl)}
+                    sub={totalTrades === 0 ? "no trades yet" : `${botReturn >= 0 ? "+" : ""}${botReturn.toFixed(2)}% of the $${STARTING_BALANCE} start · realized`}
+                    color={totalTrades === 0 ? "#9e9e9e" : pnlColor(botPnl)}
                   />
                   <StatCard
                     label="Win Rate"
-                    value={totalTrades === 0 ? "0%" : `${winRate}%`}
-                    sub={totalTrades > 0 ? `${totalTrades} total trades` : "no trades yet"}
-                    color={totalTrades === 0 ? "#9e9e9e" : winRate >= 55 ? "#00e676" : winRate >= 45 ? "#ffd54f" : "#ff1744"}
+                    value={closedTrades === 0 ? "—" : `${winRate}%`}
+                    sub={closedTrades > 0 ? `from ${closedTrades} closed trade${closedTrades === 1 ? "" : "s"}` : "no closed trades yet"}
+                    color={closedTrades === 0 ? "#9e9e9e" : winRate >= 55 ? "#00e676" : winRate >= 45 ? "#ffd54f" : "#ff1744"}
                   />
                   <StatCard
                     label="Profit Factor"
@@ -420,7 +424,7 @@ export default function Dashboard() {
                   />
                   <StatCard
                     label="Expectancy"
-                    value={expectancy !== 0 ? `$${expectancy >= 0 ? '+' : ''}${expectancy.toFixed(3)}` : "—"}
+                    value={closedTrades > 0 ? signedUsd(expectancy) : "—"}
                     sub="avg profit per trade"
                     color={pnlColor(expectancy)}
                   />
@@ -454,7 +458,7 @@ export default function Dashboard() {
                                 {pct >= 0 ? "+" : ""}{(pct ?? 0).toFixed(2)}%
                               </span>
                               <span className="font-mono text-xs font-semibold" style={{ color: pnlColor(pnl) }}>
-                                {pnl >= 0 ? "+" : ""}${(pnl ?? 0).toFixed(2)}
+                                {signedUsd(pnl ?? 0)}
                               </span>
                             </div>
                           </div>

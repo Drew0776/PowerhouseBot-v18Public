@@ -33,8 +33,8 @@ The deployment needs these set in the **Publishing → Secrets** panel
 
 Without `ALPACA_*` the live price feed will fail and the bot will fall
 back to pure simulation. Every page and API route is behind the operator
-login: without `OPERATOR_PASSWORD` the server generates a random password
-at each start and prints it once to the logs. Without `SESSION_SECRET`
+login: in production the server will not start without `OPERATOR_PASSWORD`
+(in development it generates a random one and prints it). Without `SESSION_SECRET`
 every restart signs everyone out. Failed logins are throttled to 10 per
 15 minutes per client IP.
 

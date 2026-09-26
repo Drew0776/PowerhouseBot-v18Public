@@ -72,6 +72,7 @@ try {
 import { STARTING_BALANCE } from "@shared/constants";
 import { hashString } from "@shared/hash";
 import { roundPrice } from "@shared/price";
+import { simTickVol } from "./sim-vol";
 export { STARTING_BALANCE };
 const EQUITY_CURVE_MAX_POINTS = 5000; // V17: raised from $100 — realistic position sizing (was too tight)
 
@@ -243,22 +244,8 @@ export class DatabaseStorage implements IStorage {
         COALESCE(SUM(CASE WHEN status = 'closed' AND pnl IS NOT NULL THEN total + pnl ELSE 0 END), 0) AS returned
       FROM trades
     `).get() as { spent: number; returned: number };
-    // Win rate counts positions, not rows: a T1 partial exit is stored as its
-    // own closed row carrying the parent's ticker, entry price and open time,
-    // so rows are grouped on those, P&L summed, and a position still partly
-    // open isn't counted until it is fully closed.
-    const wr = sqlite.prepare(`
-      SELECT COUNT(*) AS closedCount, COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS winCount
-      FROM (
-        SELECT ticker, opened_at, price, SUM(COALESCE(pnl, 0)) AS pnl
-        FROM trades WHERE status = 'closed'
-        GROUP BY ticker, opened_at, price
-      ) g
-      WHERE NOT EXISTS (
-        SELECT 1 FROM trades o
-        WHERE o.status = 'open' AND o.ticker = g.ticker AND o.opened_at = g.opened_at AND o.price = g.price
-      )
-    `).get() as { closedCount: number; winCount: number };
+    const closedPnls = this.closedPositionPnls();
+    const wr = { closedCount: closedPnls.length, winCount: closedPnls.filter(v => v > 0).length };
     const openTrades = db.select().from(trades).where(eq(trades.status, "open")).orderBy(desc(trades.id)).all();
 
     const cash = STARTING_BALANCE - agg.spent + agg.returned;
@@ -356,6 +343,27 @@ export class DatabaseStorage implements IStorage {
   }
 
   /**
+   * Realized P&L of each fully closed position, oldest first. A T1 partial
+   * exit is stored as its own closed row carrying the parent's ticker, entry
+   * price and open time, so rows are grouped on those and their P&L summed;
+   * a position still partly open isn't included until it is fully closed.
+   * Win rates count these, not rows (a partial used to count as its own win).
+   */
+  closedPositionPnls(): number[] {
+    const rows = sqlite.prepare(`
+      SELECT SUM(COALESCE(pnl, 0)) AS pnl
+      FROM trades g WHERE status = 'closed'
+        AND NOT EXISTS (
+          SELECT 1 FROM trades o
+          WHERE o.status = 'open' AND o.ticker = g.ticker AND o.opened_at = g.opened_at AND o.price = g.price
+        )
+      GROUP BY ticker, opened_at, price
+      ORDER BY MIN(id)
+    `).all() as { pnl: number }[];
+    return rows.map(r => r.pnl);
+  }
+
+  /**
    * Portfolio value at the start of today (ET): the last equity-curve point
    * before ET midnight, else the first point today, else the starting balance.
    */
@@ -434,22 +442,29 @@ if (storage.getEquityCurve().length === 0) {
 }
 
 // ─── Grid Bot Price Source ───────────────────────────────────────────────────
-// Grid bots read the live Alpaca quote when one is fresh. Otherwise they fall
-// back to a sinusoidal oscillator with superimposed noise: each ticker gets a
-// unique phase, frequency, and amplitude derived from its hash, and the price
-// never leaves the ±25% band around the seed.
+// Grid bots read the live Alpaca quote when one is fresh. Otherwise they
+// follow a driftless random walk with the same per-tick volatility as the
+// auto-trader's simulator, bounded to ±25% of the seed price.
+//
+// This used to be a sine wave swinging 12–24% every minute or two, which
+// hands any grid a profit by construction; a random walk has no oscillation
+// for a grid to harvest, so simulated grid results no longer look like an edge.
 //
 // Simulated grid prices live in their own map and are NOT written into
 // stockDataCache, which belongs to the auto-trader's price model. Sharing it
 // made the two simulators overwrite each other's prices.
 
-const tickCounts = new Map<string, number>(); // per-ticker tick counter
-const gridSimPrices = new Map<string, number>();
+const gridSim = new Map<string, { price: number; lcg: number }>();
 
 function liveGridPrice(ticker: string): number | null {
   if (!ALPACA_STOCK_TICKERS.has(ticker)) return null;
   const p = getAlpacaPrice(ticker);
   return p != null && p > 0 ? p : null;
+}
+
+/** True when the grid price for a ticker is a live Alpaca quote. */
+export function isLiveGridPrice(ticker: string): boolean {
+  return liveGridPrice(ticker) != null;
 }
 
 /** Advance the grid price for a ticker by one tick and return it. */
@@ -459,43 +474,24 @@ export function advanceGridPrice(ticker: string): number {
 
   const stock = stockDataCache.find(s => s.ticker === ticker);
   if (!stock) return 0;
-
   const mu = _ORIGINAL_PRICES_FROZEN.get(ticker) ?? stock.price;
-  const n  = (tickCounts.get(ticker) ?? 0) + 1;
-  tickCounts.set(ticker, n);
 
-  // Unique phase offset and frequency per ticker (derived from hash)
-  const hash   = hashString(ticker);
-  const phase  = (hash * 2.618) % (2 * Math.PI);          // golden-ratio spread
-  const freq   = 0.08 + (hash % 7) * 0.018;               // 0.08–0.19 rad/tick
-  const amp    = 0.12 + (hash % 5) * 0.03;                // 12–24% amplitude
-
-  // Primary sine wave
-  const primary = Math.sin(freq * n + phase);
-
-  // Secondary higher-frequency component for choppiness
-  const secondary = 0.4 * Math.sin(freq * 2.3 * n + phase * 1.7);
-
-  // Deterministic "noise" via LCG (seeded by ticker + tick)
-  let lcgSeed = (hash * 1664525 + n * 1013904223) & 0x7fffffff;
-  const lcgRand = () => {
-    lcgSeed = (lcgSeed * 1664525 + 1013904223) & 0x7fffffff;
-    return lcgSeed / 0x7fffffff - 0.5; // [-0.5, 0.5]
-  };
-  const noise = 0.3 * lcgRand() * amp;
-
-  // Combined wave — always bounded to ±25% around mu
-  const raw      = mu * (1 + amp * (primary + secondary) * 0.6 + noise);
-  const newPrice = Math.max(mu * 0.75, Math.min(mu * 1.25, raw));
-  gridSimPrices.set(ticker, roundPrice(newPrice, 2));
-
-  return newPrice;
+  let g = gridSim.get(ticker);
+  if (!g) { g = { price: mu, lcg: (hashString(ticker) ^ 0x5bd1e995) >>> 0 }; gridSim.set(ticker, g); }
+  g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
+  const u1 = Math.max(1e-10, g.lcg / 0xffffffff);
+  g.lcg = (g.lcg * 1664525 + 1013904223) >>> 0;
+  const u2 = g.lcg / 0xffffffff;
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  const vol = simTickVol(mu, (stock as { marketType?: string }).marketType ?? "stock");
+  g.price = roundPrice(Math.max(mu * 0.75, Math.min(mu * 1.25, g.price * (1 + vol * z))));
+  return g.price;
 }
 
 /** Current grid price without advancing (live quote, else last simulated, else seed). */
 export function getGridPrice(ticker: string): number {
   return liveGridPrice(ticker)
-    ?? gridSimPrices.get(ticker)
+    ?? gridSim.get(ticker)?.price
     ?? _ORIGINAL_PRICES_FROZEN.get(ticker)
     ?? 0;
 }

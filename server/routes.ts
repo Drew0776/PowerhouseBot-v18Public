@@ -2,7 +2,9 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage, sqlite, getStockData, getStockByTicker, getGridPrice, STARTING_BALANCE } from "./storage";
 import { requireAuth, passport } from "./auth";
-import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow, generateMarketStatus } from "./seed";
+import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow } from "./seed";
+import { nextSessionChange } from "./market-calendar";
+import type { MarketStatus } from "@shared/schema";
 import {
   createGridBot,
   getAllGridBots,
@@ -94,8 +96,8 @@ export async function registerRoutes(
   app.post("/api/auth/login", (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip ?? "unknown";
     const now = Date.now();
-    const entry = loginFailures.get(ip);
-    if (entry && entry.resetAt <= now) loginFailures.delete(ip);
+    // Drop expired windows so the table can't grow without bound.
+    for (const [k, v] of loginFailures) if (v.resetAt <= now) loginFailures.delete(k);
     const current = loginFailures.get(ip);
     if (current && current.count >= LOGIN_MAX_FAILURES) {
       res.setHeader("Retry-After", String(Math.ceil((current.resetAt - now) / 1000)));
@@ -291,11 +293,20 @@ export async function registerRoutes(
     }
   });
 
-  // GET /api/market-status — simulated market overview
+  // GET /api/market-status — US session state and a few reference prices.
+  // Prices are live Alpaca quotes where available, otherwise the simulator's
+  // own prices (the ones the bot is trading), flagged as such. There is no
+  // source for index levels, VIX or sentiment, so none are shown; these used
+  // to be random numbers regenerated on every request.
   app.get("/api/market-status", (_req, res) => {
     try {
-      const rand = seededRandom(Date.now() % 10000);
-      const status = generateMarketStatus(rand);
+      const session = nextSessionChange();
+      const quotes = ["SPY", "QQQ", "BTC"].flatMap(symbol => {
+        const live = ALPACA_STOCK_TICKERS.has(symbol) ? getAlpacaPrice(symbol) : null;
+        const price = live ?? getStockByTicker(symbol)?.price;
+        return price ? [{ symbol, price, live: live != null }] : [];
+      });
+      const status: MarketStatus = { sessionOpen: session.open, nextSessionChange: session.at.toISOString(), quotes };
       res.json(status);
     } catch (err) {
       res.status(500).json({ message: "Failed to get market status" });
@@ -382,21 +393,19 @@ export async function registerRoutes(
   app.get("/api/trades", requireAuth, (_req, res) => {
     try {
       const allTrades = storage.getTrades();
-      const closedTrades = allTrades.filter((t) => t.status === "closed");
-      const winningTrades = closedTrades.filter((t) => t.pnl !== null && t.pnl > 0);
-      const losingTrades = closedTrades.filter((t) => t.pnl !== null && t.pnl < 0);
-      const avgReturn = closedTrades.length > 0
-        ? Math.round(
-            closedTrades.reduce((s, t) => s + (t.pnl || 0), 0) / closedTrades.length * 100
-          ) / 100
+      // Counted per position, so a T1 partial exit and its remainder are one
+      // trade (they used to count as two, the partial as an extra win).
+      const results = storage.closedPositionPnls();
+      const avgReturn = results.length > 0
+        ? Math.round(results.reduce((s, v) => s + v, 0) / results.length * 100) / 100
         : 0;
 
       res.json({
         trades: allTrades,
         summary: {
           totalTrades: allTrades.length,
-          winningTrades: winningTrades.length,
-          losingTrades: losingTrades.length,
+          winningTrades: results.filter(v => v > 0).length,
+          losingTrades: results.filter(v => v < 0).length,
           averageReturn: avgReturn,
         },
       });
@@ -713,13 +722,13 @@ export async function registerRoutes(
         return res.status(404).json({ message: `Ticker ${ticker.toUpperCase()} not found in universe` });
       }
 
-      // V8: Prevent duplicate active bots on same ticker
-      const existingBots = getAllGridBots();
-      const activeDuplicate = existingBots.find(
-        b => b.ticker.toUpperCase() === ticker.toUpperCase() && b.status === "active"
+      // One live bot per ticker. Paused bots count: they resume later, and
+      // two bots on one ticker would both step its simulated price each tick.
+      const duplicate = getAllGridBots().find(
+        b => b.ticker.toUpperCase() === ticker.toUpperCase() && b.status !== "stopped" && b.status !== "stopped_range_exit"
       );
-      if (activeDuplicate) {
-        return res.status(400).json({ message: `An active grid bot already exists for ${ticker.toUpperCase()}. Stop it before creating a new one.` });
+      if (duplicate) {
+        return res.status(400).json({ message: `A grid bot for ${ticker.toUpperCase()} already exists (${duplicate.status}). Stop it before creating a new one.` });
       }
 
       // Check portfolio cash

@@ -14,8 +14,8 @@ import { eq, desc } from "drizzle-orm";
 import { gridBots, gridOrders, gridEvents } from "@shared/schema";
 import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
-import { storage, getStockByTicker, advanceGridPrice, getGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
-import { isGridBreakerActive } from "./auto-trader";
+import { storage, getStockByTicker, advanceGridPrice, getGridPrice, isLiveGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
+import { isGridBreakerActive, modelledCost } from "./auto-trader";
 import { roundPrice } from "@shared/price";
 
 // Create tables if they don't exist (uses shared connection)
@@ -234,6 +234,18 @@ export function sharesPerLevel(totalInvestment: number, count: number, entryPric
   return Math.round((totalInvestment / count / entryPrice) * 10000) / 10000;
 }
 
+/**
+ * Half-spread cost of a market order (the opening buy and flatten exits).
+ * Resting limit orders at the grid levels fill at their price and pay none.
+ */
+function marketCost(ticker: string, shares: number, price: number): number {
+  const mt = (getStockByTicker(ticker) as { marketType?: string } | undefined)?.marketType ?? "stock";
+  return modelledCost(shares, price, mt);
+}
+
+/** Last price each bot saw, to detect which levels the price crossed. */
+const lastSeenPrice = new Map<number, number>();
+
 // ── Per-bot background tick intervals ──────────────────────────────────────────
 const _botIntervals = new Map<number, ReturnType<typeof setInterval>>();
 
@@ -250,6 +262,9 @@ export function startGridBotLoop(id: number): void {
 export function stopGridBotLoop(id: number): void {
   const interval = _botIntervals.get(id);
   if (interval) { clearInterval(interval); _botIntervals.delete(id); }
+  // No orders rest while the loop is stopped, so moves made meanwhile must
+  // not count as crossings when it restarts.
+  lastSeenPrice.delete(id);
 }
 
 /** Create a new grid bot */
@@ -569,7 +584,8 @@ function closeAllOpenPositions(bot: GridBot, marketPrice: number): void {
   let fillsDelta = 0;
   const nowIso = new Date().toISOString();
   for (const buy of Array.from(openBuys.values())) {
-    const pnl = Math.round((marketPrice - buy.fillPrice) * buy.shares * 100) / 100;
+    // Flattening is a market sell: it pays the half-spread.
+    const pnl = Math.round(((marketPrice - buy.fillPrice) * buy.shares - marketCost(bot.ticker, buy.shares, marketPrice)) * 100) / 100;
     const total = Math.round(buy.shares * marketPrice * 100) / 100;
     gridDb.insert(gridOrders).values({
       botId: bot.id,
@@ -669,91 +685,63 @@ export function tickGridBot(botId: number): GridOrder | null {
     return null;
   }
 
-  // Find the grid level index the price is currently AT or just below
-  let nearestLevelIdx = 0;
-  for (let i = 0; i < levels.length; i++) {
-    if (levels[i] <= currentPrice) nearestLevelIdx = i;
-    else break;
-  }
+  const prev = lastSeenPrice.get(botId);
+  lastSeenPrice.set(botId, currentPrice);
+  const openBuys = openBuysOf(getGridOrders(botId));
+  const top = levels.length - 1;
+  const fills: Array<{ action: "buy" | "sell"; level: number; price: number; shares: number; pnl: number | null }> = [];
 
-  const allOrders = getGridOrders(botId);
-
-  // Build a map of which levels have open (unmatched) BUY positions
-  // A buy is "open" if its level has no subsequent SELL at level+1
-  const openBuys = new Map<number, GridOrder>(); // level → most recent open buy
-  for (const o of [...allOrders].reverse()) {
-    if (o.action === "buy") {
-      // Mark as open unless already closed by a sell
-      if (!openBuys.has(o.level)) {
-        openBuys.set(o.level, o);
-      }
-    } else if (o.action === "sell") {
-      // A sell at level L closes the open buy at level L-1
-      openBuys.delete(o.level - 1);
-    }
-  }
-
-  const shareQty = sharesPerLevel(bot.totalInvestment, bot.gridCount, levels[nearestLevelIdx] || currentPrice);
-
-  let action: "buy" | "sell";
-  let targetLevel: number;
-  let pnl: number | null = null;
-  let matchedBuy: GridOrder | null = null;
-
-  // ── SELL check: price has risen above a level where we have an open buy ──
-  // Look for any open buy at nearestLevelIdx-1 (price just moved above it)
-  const sellLevel = nearestLevelIdx; // current level = potential sell target
-  const buyLevelForSell = sellLevel - 1;
-  if (buyLevelForSell >= 0 && openBuys.has(buyLevelForSell)) {
-    matchedBuy = openBuys.get(buyLevelForSell)!;
-    // Only sell if current price is genuinely above the buy level
-    if (currentPrice >= levels[sellLevel]) {
-      action = "sell";
-      targetLevel = sellLevel;
-      pnl = Math.round((levels[sellLevel] - matchedBuy.gridPrice) * matchedBuy.shares * 100) / 100;
-    } else {
-      return null;
+  if (prev === undefined) {
+    // First look at the price (new bot, or the first tick after a restart).
+    // A brand-new bot opens with one market buy at the level just below the
+    // price so it has something to sell on the way up; otherwise just note
+    // the price — fills need a price move to compare against.
+    if (getGridOrders(botId).length === 0) {
+      let lvl = 0;
+      for (let k = 0; k < top; k++) if (levels[k] <= currentPrice) lvl = k;
+      const shares = sharesPerLevel(bot.totalInvestment, bot.gridCount, currentPrice);
+      const fill = roundPrice(currentPrice + marketCost(bot.ticker, shares, currentPrice) / shares);
+      fills.push({ action: "buy", level: lvl, price: fill, shares, pnl: null });
     }
   } else {
-    // ── BUY check: price has fallen to a level we haven't bought yet ──
-    const alreadyBoughtHere = openBuys.has(nearestLevelIdx);
-    if (!alreadyBoughtHere) {
-      action = "buy";
-      targetLevel = nearestLevelIdx;
-    } else {
-      // Already have an open buy at this level — no action
-      return null;
+    // Resting limit orders fill only when the price reaches them:
+    //  - a sell one level above each open buy, when the price rises to it;
+    //  - a buy at each empty level the price fell through since last tick.
+    // Fills are booked at the level price. (The bot used to "buy" at the
+    // level below the price without the price ever coming down to it.)
+    for (const [lvl, buy] of openBuys) {
+      if (lvl + 1 <= top && currentPrice >= levels[lvl + 1]) {
+        const pnl = Math.round((levels[lvl + 1] - buy.fillPrice) * buy.shares * 100) / 100;
+        fills.push({ action: "sell", level: lvl + 1, price: levels[lvl + 1], shares: buy.shares, pnl });
+        openBuys.delete(lvl);
+      }
+    }
+    for (let k = 0; k < top; k++) {
+      if (openBuys.has(k) || fills.some(f => f.action === "sell" && f.level - 1 === k)) continue;
+      if (currentPrice <= levels[k] && levels[k] < prev) {
+        fills.push({ action: "buy", level: k, price: levels[k], shares: sharesPerLevel(bot.totalInvestment, bot.gridCount, levels[k]), pnl: null });
+      }
     }
   }
+  if (fills.length === 0) return null;
 
-  const fillPrice = levels[targetLevel];
-  const total = Math.round(shareQty * fillPrice * 100) / 100;
-
-  // Record the grid order
-  const order = gridDb.insert(gridOrders).values({
-    botId,
-    ticker: bot.ticker,
-    level: targetLevel,
-    gridPrice: fillPrice,
-    action,
-    fillPrice,
-    shares: shareQty,
-    total,
-    pnl,
-    filledAt: new Date().toISOString(),
-  }).returning().get();
-
-  // Update bot stats
-  const newPnl = pnl !== null
-    ? Math.round((bot.realizedPnl + pnl) * 100) / 100
-    : bot.realizedPnl;
-
+  let last: GridOrder | null = null;
+  let realized = bot.realizedPnl;
+  const nowIso = new Date().toISOString();
+  for (const f of fills) {
+    last = gridDb.insert(gridOrders).values({
+      botId, ticker: bot.ticker, level: f.level, gridPrice: levels[f.level] ?? f.price, action: f.action,
+      fillPrice: f.price, shares: f.shares, total: Math.round(f.shares * f.price * 100) / 100,
+      pnl: f.pnl, filledAt: nowIso,
+    }).returning().get();
+    if (f.pnl !== null) realized = Math.round((realized + f.pnl) * 100) / 100;
+  }
   gridDb.update(gridBots).set({
-    realizedPnl: newPnl,
-    totalGridFills: bot.totalGridFills + 1,
+    realizedPnl: realized,
+    totalGridFills: bot.totalGridFills + fills.length,
   }).where(eq(gridBots.id, botId)).run();
 
-  return order;
+  return last;
 }
 
 /**
@@ -793,24 +781,11 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
     };
   });
 
-  // Unrealized P&L: sum up open buy positions that haven't been sold yet
-  // Simple: count unmatched buys
-  let openBuyTotal = 0;
-  let openBuyValue = 0;
-  for (const o of allOrders) {
-    if (o.action === "buy") {
-      openBuyTotal += o.total;
-      openBuyValue += o.shares * currentPrice;
-    } else if (o.action === "sell") {
-      // Offset the most recent matched buy
-      const matchedBuy = allOrders.find(b => b.action === "buy" && b.level === o.level - 1);
-      if (matchedBuy) {
-        openBuyTotal -= matchedBuy.total;
-        openBuyValue -= matchedBuy.shares * currentPrice;
-      }
-    }
-  }
-  const unrealizedPnl = Math.round((openBuyValue - openBuyTotal) * 100) / 100;
+  // Unrealized P&L of the open (unsold) buys — the same pairing the reserve
+  // valuation uses, so this page and the portfolio agree.
+  let unrealized = 0;
+  for (const buy of openBuysOf(allOrders).values()) unrealized += (currentPrice - buy.fillPrice) * buy.shares;
+  const unrealizedPnl = Math.round(unrealized * 100) / 100;
 
   // Active level (which level is current price at)
   const activeLevel = levels.reduce((best, p, i) => {
@@ -824,6 +799,7 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
     unrealizedPnl,
     totalPnl: Math.round((bot.realizedPnl + unrealizedPnl) * 100) / 100,
     currentPrice,
+    priceIsLive: isLiveGridPrice(bot.ticker),
     activeLevel,
   };
 }

@@ -118,3 +118,41 @@ export function isRegularSessionOpen(etNow: Date): boolean {
   const mins = etNow.getHours() * 60 + etNow.getMinutes();
   return mins >= OPEN_MINUTES && mins < close;
 }
+
+const ET_PARTS = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", hourCycle: "h23",
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+
+/** ET wall-clock fields of an instant, read back as if they were UTC. */
+function etWallAsUtc(t: number): number {
+  const p = Object.fromEntries(ET_PARTS.formatToParts(new Date(t)).map(x => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+}
+
+/** The UTC instant of an ET wall-clock time (handles EST and EDT). */
+function etToUtc(y: number, m: number, d: number, minutes: number): number {
+  const wall = Date.UTC(y, m - 1, d, 0, minutes);
+  let t = wall + (wall - etWallAsUtc(wall));
+  t = wall + (t - etWallAsUtc(t)); // second pass settles DST-change days
+  return t;
+}
+
+/**
+ * Whether the regular session is open at `now`, and when that next changes:
+ * today's close while open, otherwise the next trading day's open.
+ */
+export function nextSessionChange(now: Date = new Date()): { open: boolean; at: Date } {
+  const wall = new Date(etWallAsUtc(now.getTime()));
+  for (let i = 0; i < 14; i++) {
+    const day = new Date(Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate() + i));
+    const y = day.getUTCFullYear(), m = day.getUTCMonth() + 1, d = day.getUTCDate();
+    const dow = day.getUTCDay();
+    if (dow === 0 || dow === 6 || holidaysFor(y).has(key(y, m, d))) continue;
+    const open = etToUtc(y, m, d, OPEN_MINUTES);
+    const close = etToUtc(y, m, d, isEarlyClose(y, m, d) ? EARLY_CLOSE_MINUTES : CLOSE_MINUTES);
+    if (now.getTime() < open) return { open: false, at: new Date(open) };
+    if (now.getTime() < close) return { open: true, at: new Date(close) };
+  }
+  throw new Error("no trading day in the next two weeks");
+}

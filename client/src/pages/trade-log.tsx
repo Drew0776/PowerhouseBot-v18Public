@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, memo, useCallback } from "react";
-import { formatPrice } from "@shared/price";
+import { formatPrice, signedUsd } from "@shared/price";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Trade } from "@shared/schema";
@@ -60,7 +60,7 @@ function CalendarHeatmap({ trades }: { trades: Trade[] }) {
                   key={d.date}
                   className="w-5 h-5 rounded-sm"
                   style={{ backgroundColor: color }}
-                  title={`${d.date}: ${d.pnl >= 0 ? "+" : ""}$${(d.pnl ?? 0).toFixed(2)}`}
+                  title={`${d.date}: ${signedUsd(d.pnl ?? 0)}`}
                 />
               );
             })}
@@ -166,7 +166,7 @@ const TradeRow = memo(function TradeRow({ trade: t, top, onClose, isClosing }: R
       <div className="px-3 text-right font-mono tabular-nums">
         {t.pnl !== null ? (
           <span style={{ color: t.pnl >= 0 ? "#00e676" : "#ff1744" }}>
-            {t.pnl >= 0 ? "+" : ""}${(t.pnl ?? 0).toFixed(2)}
+            {signedUsd(t.pnl ?? 0)}
           </span>
         ) : "—"}
       </div>
