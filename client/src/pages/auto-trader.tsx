@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { formatPrice } from "@shared/price";
 import { STARTING_BALANCE } from "@shared/constants";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -875,7 +876,7 @@ function HeatmapTile({ item }: HeatmapTileProps) {
               </span>
             </div>
             <div className="text-[10px] font-mono text-zinc-400">
-              ${fmt(item.price)}
+              ${formatPrice(item.price)}
             </div>
             {item.signal && SIGNAL_COLORS[item.signal] && (
               <div className="text-[9px] font-mono text-zinc-500 mt-1">
@@ -1044,11 +1045,11 @@ function PositionsTable({ positions }: { positions: ActivePosition[] }) {
             <span className="self-center">{strategyBadge(pos.strategy)}</span>
 
             <span className="font-mono text-xs text-zinc-300 text-right self-center">
-              ${fmt(pos.entryPrice)}
+              ${formatPrice(pos.entryPrice)}
             </span>
 
             <span className="font-mono text-xs text-white text-right self-center">
-              ${fmt(pos.currentPrice)}
+              ${formatPrice(pos.currentPrice)}
             </span>
 
             <span className="font-mono text-xs text-zinc-400 text-right self-center">
@@ -1079,11 +1080,11 @@ function PositionsTable({ positions }: { positions: ActivePosition[] }) {
             </span>
 
             <span className="font-mono text-xs text-yellow-400/90 text-right self-center">
-              ${fmt(pos.trailingStop)}
+              ${formatPrice(pos.trailingStop)}
             </span>
 
             <span className="font-mono text-xs text-[#00bcd4]/90 text-right self-center">
-              ${fmt(pos.takeProfit2 ?? pos.takeProfit)}
+              ${formatPrice(pos.takeProfit2 ?? pos.takeProfit)}
             </span>
 
             <div className="flex justify-end self-center">
@@ -1168,16 +1169,16 @@ function SignalScanner({ signals }: { signals: BreakoutSignal[] }) {
           <span>{strategyBadge(sig.strategy)}</span>
 
           <span className="font-mono text-xs text-white text-right">
-            ${fmt(sig.price)}
+            ${formatPrice(sig.price)}
           </span>
           <span className="font-mono text-xs text-zinc-300 text-right">
-            ${fmt(sig.entryPrice)}
+            ${formatPrice(sig.entryPrice)}
           </span>
           <span className="font-mono text-xs text-[#ff1744]/80 text-right">
-            ${fmt(sig.stopLoss)}
+            ${formatPrice(sig.stopLoss)}
           </span>
           <span className="font-mono text-xs text-[#00e676]/80 text-right">
-            ${fmt(sig.takeProfit1 ?? sig.takeProfit)}
+            ${formatPrice(sig.takeProfit1 ?? sig.takeProfit)}
           </span>
 
           <div className="flex flex-wrap gap-1">
@@ -1341,7 +1342,7 @@ export default function AutoTraderPage() {
       if (result?.entered) {
         toast({
           title: `Entered ${result.entered.ticker}`,
-          description: `${result.entered.strategy} · ${(result.entered.shares ?? 0).toFixed(4)} shares @ $${fmt(result.entered.entryPrice)}`,
+          description: `${result.entered.strategy} · ${(result.entered.shares ?? 0).toFixed(4)} shares @ $${formatPrice(result.entered.entryPrice)}`,
         });
       }
     },

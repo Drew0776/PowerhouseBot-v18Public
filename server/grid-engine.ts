@@ -16,6 +16,7 @@ import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
 import { storage, getStockByTicker, advanceGridPrice, getGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
 import { isGridBreakerActive } from "./auto-trader";
+import { roundPrice } from "@shared/price";
 
 // Create tables if they don't exist (uses shared connection)
 sqlite.exec(`
@@ -85,7 +86,7 @@ try {
 /** Build equally-spaced grid levels between lower and upper */
 export function buildGridLevels(lower: number, upper: number, count: number): number[] {
   const step = (upper - lower) / count;
-  return Array.from({ length: count + 1 }, (_, i) => Math.round((lower + i * step) * 100) / 100);
+  return Array.from({ length: count + 1 }, (_, i) => roundPrice(lower + i * step, 2));
 }
 
 // ── Task #50/#56: ATR-based spacing ──────────────────────────────────────────
@@ -223,8 +224,8 @@ export function suggestGridCount(lower: number, upper: number, price: number): n
 
 /** Auto-calculate optimal range centered on current price */
 export function autoRange(currentPrice: number, volatilityPct = 0.20): { lower: number; upper: number } {
-  const lower = Math.round(currentPrice * (1 - volatilityPct) * 100) / 100;
-  const upper = Math.round(currentPrice * (1 + volatilityPct) * 100) / 100;
+  const lower = roundPrice(currentPrice * (1 - volatilityPct), 2);
+  const upper = roundPrice(currentPrice * (1 + volatilityPct), 2);
   return { lower, upper };
 }
 

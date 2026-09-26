@@ -57,8 +57,7 @@ async function sendTelegramAlert(message: string): Promise<void> {
 export { sendTelegramAlert };
 
 // Alpaca feed
-import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed, setAlpacaPriceCallback } from "./alpaca";
-import { pushMtfBar } from "./auto-trader";
+import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed } from "./alpaca";
 import { z } from "zod";
 
 // Deterministic random for market status & options flow
@@ -900,9 +899,8 @@ export async function registerRoutes(
     }
   });
 
-  // Bug 7 fix: Push Alpaca prices into MTF history for all tickers, not just traded ones.
-  // This ensures momentum scoring works correctly for all 181 tickers from startup.
-  setAlpacaPriceCallback(pushMtfBar);
+  // Price history for the indicators is sampled once per engine tick inside the
+  // auto-trader (evenly spaced); quotes are no longer pushed into it on arrival.
 
   // Auto-start the Alpaca price feed on server init so prices are live immediately
   startAlpacaFeed();

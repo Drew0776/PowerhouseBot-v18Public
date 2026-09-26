@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { STARTING_BALANCE } from "@shared/constants";
+import { formatPrice } from "@shared/price";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import type { PortfolioSummary, GridBot } from "@shared/schema";
 import KpiCards from "@/components/kpi-cards";
@@ -41,7 +42,7 @@ interface AlpacaStatus {
   account?: { status: string; portfolioValue: number; cash: number; buyingPower: number } | null;
 }
 
-type ScanDebugGate = "mtf" | "rsi" | "bollinger" | "score" | "cooldown" | "open_position" | null;
+type ScanDebugGate = "warmup" | "mtf" | "rsi" | "bollinger" | "score" | "cooldown" | "open_position" | null;
 interface ScanDebugCandidate {
   ticker: string;
   score: number | null;
@@ -59,6 +60,7 @@ interface ScanDebugSnapshot {
 }
 
 const GATE_LABELS: Record<Exclude<ScanDebugGate, null>, string> = {
+  warmup: "collecting price history",
   mtf: "trend (MTF)",
   rsi: "RSI out of range",
   bollinger: "Bollinger too low",
@@ -220,8 +222,8 @@ function NextGridLevelsHero() {
     .sort((a, b) => a.price - b.price)[0];
 
   const value = `${summary.bot.ticker} $${cp.toFixed(2)}`;
-  const buyTxt = nextBuy ? `buy $${nextBuy.price.toFixed(2)}` : "—";
-  const sellTxt = nextSell ? `sell $${nextSell.price.toFixed(2)}` : "—";
+  const buyTxt = nextBuy ? `buy $${formatPrice(nextBuy.price)}` : "—";
+  const sellTxt = nextSell ? `sell $${formatPrice(nextSell.price)}` : "—";
   const sub =
     active.length > 1
       ? `${buyTxt} / ${sellTxt} · +${active.length - 1} more bot${active.length - 1 === 1 ? "" : "s"}`
@@ -526,7 +528,7 @@ export default function Dashboard() {
                 </div>
                 {showRejected && (
                   <div className="px-4 py-3 space-y-3" data-testid="rejected-candidates">
-                    {(["mtf", "rsi", "bollinger", "score", "cooldown", "open_position"] as const).map((reason) => {
+                    {(["warmup", "mtf", "rsi", "bollinger", "score", "cooldown", "open_position"] as const).map((reason) => {
                       const items = scanDebug.candidates.filter((c) => c.gateFailed === reason);
                       if (items.length === 0) return null;
                       return (
@@ -538,7 +540,7 @@ export default function Dashboard() {
                             {items.slice(0, 20).map((c) => (
                               <span
                                 key={c.ticker}
-                                title={`score=${c.score ?? "—"} · mtfBars=${c.mtfBars} · price=$${c.price.toFixed(2)} · priceAge=${c.priceAge < 0 ? "n/a" : `${Math.round(c.priceAge / 1000)}s`}`}
+                                title={`score=${c.score ?? "—"} · mtfBars=${c.mtfBars} · price=$${formatPrice(c.price)} · priceAge=${c.priceAge < 0 ? "n/a" : `${Math.round(c.priceAge / 1000)}s`}`}
                                 className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0d0f12] border border-zinc-700 text-zinc-300"
                               >
                                 {c.ticker}

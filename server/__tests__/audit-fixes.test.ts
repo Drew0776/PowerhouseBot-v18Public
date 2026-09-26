@@ -241,3 +241,38 @@ test("getPortfolio's SQL aggregates match the row-by-row arithmetic", () => {
   const openTickers = new Set(all.filter(t => t.status === "open").map(t => t.ticker));
   assert.equal(p.openPositions, openTickers.size);
 });
+
+test("day P&L is measured from the value at the start of the ET day", () => {
+  sqlite.exec("DELETE FROM equity_curve;");
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 36 * 3600 * 1000).toISOString();
+  // No history at all: the day starts at the starting balance.
+  assert.equal(storage.dayStartValue(now), STARTING_BALANCE);
+  // Only points from today: the first one is the day's start.
+  storage.addEquityCurvePoint({ timestamp: new Date(now.getTime() - 60_000).toISOString(), value: 490 });
+  storage.addEquityCurvePoint({ timestamp: now.toISOString(), value: 495 });
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const minutesIntoEtDay = et.getHours() * 60 + et.getMinutes();
+  if (minutesIntoEtDay > 2) assert.equal(storage.dayStartValue(now), 490);
+  // A point from before ET midnight wins.
+  storage.addEquityCurvePoint({ timestamp: yesterday, value: 480 });
+  assert.equal(storage.dayStartValue(now), 480);
+  const p = storage.getPortfolio();
+  assert.equal(p.dayPnl, Math.round((p.totalValue - 480) * 100) / 100);
+});
+
+test("cross-site state-changing requests are refused; same-origin ones pass", () => {
+  const run = (method: string, headers: Record<string, string>) => {
+    let status = 0, passed = false;
+    const req = { method, get: (h: string) => headers[h.toLowerCase()] } as any;
+    const res = { status(c: number) { status = c; return this; }, json() { return this; } } as any;
+    authMod.sameOriginGuard(req, res, () => { passed = true; });
+    return passed ? "next" : status;
+  };
+  assert.equal(run("POST", { host: "bot.example.com", origin: "https://evil.example.net" }), 403);
+  assert.equal(run("POST", { host: "bot.example.com", origin: "https://bot.example.com" }), "next");
+  assert.equal(run("POST", { host: "internal:5000", "x-forwarded-host": "bot.example.com", origin: "https://bot.example.com" }), "next");
+  assert.equal(run("POST", { host: "bot.example.com" }), "next", "no Origin: left to the session check");
+  assert.equal(run("GET", { host: "bot.example.com", origin: "https://evil.example.net" }), "next", "safe methods pass");
+  assert.equal(run("POST", { host: "bot.example.com", origin: "null" }), 403, "opaque origins are refused");
+});
