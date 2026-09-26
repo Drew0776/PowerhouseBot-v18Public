@@ -1072,7 +1072,8 @@ function managePositions() {
 
 // ─── Circuit Breaker — Graduated ─────────────────────────────────────────────
 
-function checkCircuitBreaker() {
+/** Today's drawdown vs dailyStart, and the tier limit it's measured against. */
+function drawdownStatus(): { totalValue: number; dd: number; limit: number } {
   const p = storage.getPortfolio();
   const dd = (dailyStart.value - p.totalValue) / Math.max(dailyStart.value, 1);
   // Task #64: anchor the tier selector to the day's STARTING value, not the
@@ -1083,6 +1084,12 @@ function checkCircuitBreaker() {
   // because it's a real-dollar liquidation safety net, not a tier label.
   const tierAnchor = dailyStart.value;
   const limit = tierAnchor >= 500 ? 0.03 : tierAnchor >= 200 ? 0.05 : DAILY_DD_LIMIT;
+  return { totalValue: p.totalValue, dd, limit };
+}
+
+function checkCircuitBreaker() {
+  const { totalValue, dd, limit } = drawdownStatus();
+  const p = { totalValue };
   if (p.totalValue <= 50 && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`🚨 HARD FLOOR $50 | Emergency stop`);
@@ -1090,10 +1097,10 @@ function checkCircuitBreaker() {
     state.circuitBreakerActive = true;
     log(`⚠️ CIRCUIT BREAKER | Drawdown ${(dd*100).toFixed(1)}% ≥ ${(limit*100).toFixed(0)}% limit | Paused`);
   }
-  // Once tripped the breaker stays latched: it clears only on a manual reset
-  // (resetCircuitBreaker) or when a new ET trading day re-baselines dailyStart
-  // (rollDailyAnchor). Auto-clearing on "recovery" let a bouncing mark switch
-  // the daily-loss limit off and on again within the same day.
+  // Once tripped the breaker stays latched for the auto-trader: it clears only
+  // on a manual reset (resetCircuitBreaker) or when a new ET trading day
+  // re-baselines dailyStart (rollDailyAnchor). Grid bots use the softer
+  // isGridBreakerActive() below, which lets them resume once drawdown recovers.
 }
 
 /**
@@ -1734,6 +1741,19 @@ export function evaluateCircuitBreaker(): boolean {
     checkCircuitBreaker();
   } catch (_e) { /* non-fatal */ }
   return state.circuitBreakerActive;
+}
+
+/**
+ * Kill switch as seen by grid bots. They park when the breaker trips, but —
+ * unlike the latched auto-trader — resume automatically once the drawdown is
+ * back under the tier limit (and above the $50 hard floor). A manual reset or
+ * a new trading day also releases them.
+ */
+export function isGridBreakerActive(): boolean {
+  if (!evaluateCircuitBreaker()) return false;
+  const { totalValue, dd, limit } = drawdownStatus();
+  const recovered = totalValue > 50 && dd < limit;
+  return !recovered;
 }
 
 export function isAutoTraderRunning(): boolean {

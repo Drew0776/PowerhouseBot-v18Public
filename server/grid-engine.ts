@@ -15,7 +15,7 @@ import { gridBots, gridOrders, gridEvents } from "@shared/schema";
 import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
 import { storage, getStockByTicker, advanceGridPrice, getGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
-import { evaluateCircuitBreaker } from "./auto-trader";
+import { isGridBreakerActive } from "./auto-trader";
 
 // Create tables if they don't exist (uses shared connection)
 sqlite.exec(`
@@ -622,7 +622,7 @@ export function tickGridBot(botId: number): GridOrder | null {
   // hard-drawdown protection). On trip, every grid bot is flattened at
   // market and parked in `paused_by_breaker`; the boot-time watcher (see
   // bootGridEngine) auto-resumes these bots once drawdown recovers.
-  if (evaluateCircuitBreaker()) {
+  if (isGridBreakerActive()) {
     const livePrice = getGridPrice(bot.ticker);
     const marketPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
     closeAllOpenPositions(bot, marketPrice);
@@ -849,7 +849,7 @@ export function watchBreakerResume(): void {
   // Re-evaluate from the live portfolio before deciding to resume so the
   // breaker's reset condition (portfolio recovered above drawdown limit)
   // is observed independent of the auto-trader loop.
-  if (evaluateCircuitBreaker()) return;
+  if (isGridBreakerActive()) return;
   const parked = gridDb.select().from(gridBots)
     .where(eq(gridBots.status, "paused_by_breaker")).all();
   for (const bot of parked) {
