@@ -165,7 +165,8 @@ function botHasOpenBuys(botId: number): boolean {
  * level N-1. While there are open buys we keep the current gridCount so level
  * indices remain stable across ticks.
  */
-export function computeBotLevels(bot: GridBot): number[] {
+export function computeBotLevels(bot: GridBot, opts: { persist?: boolean } = {}): number[] {
+  const persist = opts.persist ?? true;
   if (bot.spacingMode !== "atr") {
     return buildGridLevels(bot.lowerPrice, bot.upperPrice, bot.gridCount);
   }
@@ -185,7 +186,7 @@ export function computeBotLevels(bot: GridBot): number[] {
   // Freeze re-spacing while the current grid cycle has open buys so existing
   // (level → price) bindings don't shift under fills that are mid-flight.
   const effectiveCount = botHasOpenBuys(bot.id) ? bot.gridCount : derived;
-  if (effectiveCount !== bot.gridCount) {
+  if (persist && effectiveCount !== bot.gridCount) {
     // Persist so summary, profit-per-grid, and future ticks all agree.
     const newProfitPerGrid = calcProfitPerGrid(bot.lowerPrice, bot.upperPrice, effectiveCount);
     try {
@@ -765,7 +766,8 @@ export function getGridBotSummary(botId: number): GridBotSummary | null {
   const livePrice = getGridPrice(bot.ticker);
   const currentPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
 
-  const levels = computeBotLevels(bot);
+  // Read-only: a GET for the summary must not persist a resized grid.
+  const levels = computeBotLevels(bot, { persist: false });
   const allOrders = getGridOrders(botId);
 
   // Compute per-level fill info
@@ -864,6 +866,7 @@ export function watchBreakerResume(): void {
  *  - Starts the global breaker-resume watcher.
  */
 export function bootGridEngine(): void {
+  linkLegacyReserves();
   for (const bot of getAllGridBots()) {
     if (bot.status === "active") startGridBotLoop(bot.id);
   }
@@ -871,5 +874,43 @@ export function bootGridEngine(): void {
     _breakerWatcher = setInterval(() => {
       try { watchBreakerResume(); } catch (_e) { /* non-fatal */ }
     }, 5000);
+  }
+}
+
+/** Stop the breaker watcher and every bot loop (tests / graceful shutdown). */
+export function shutdownGridEngine(): void {
+  if (_breakerWatcher) { clearInterval(_breakerWatcher); _breakerWatcher = null; }
+  for (const id of Array.from(_botIntervals.keys())) stopGridBotLoop(id);
+}
+
+/**
+ * Bots created before reserve_trade_id existed have no link to the "buy"
+ * trade that reserved their capital, so they were marked like a stock and
+ * never paid back. Match each to its open reserve trade (same ticker, total
+ * equal to the investment, opened within 5 s before the bot) and link it. For
+ * bots that already stopped, flatten any open grid buys and settle now.
+ */
+function linkLegacyReserves(): void {
+  const bots = getAllGridBots().filter(b => b.reserveTradeId == null);
+  if (bots.length === 0) return;
+  const linked = new Set(getAllGridBots().map(b => b.reserveTradeId).filter((x): x is number => x != null));
+  const open = storage.getOpenTrades();
+  for (const bot of bots) {
+    const created = Date.parse(bot.createdAt);
+    const match = open.find(t =>
+      !linked.has(t.id) &&
+      t.ticker === bot.ticker &&
+      Math.abs(t.total - bot.totalInvestment) < 0.005 &&
+      created - Date.parse(t.openedAt) >= 0 &&
+      created - Date.parse(t.openedAt) <= 5000,
+    );
+    if (!match) continue;
+    linked.add(match.id);
+    gridDb.update(gridBots).set({ reserveTradeId: match.id }).where(eq(gridBots.id, bot.id)).run();
+    bot.reserveTradeId = match.id;
+    if (bot.status === "stopped" || bot.status === "stopped_range_exit") {
+      closeAllOpenPositions(bot, getGridPrice(bot.ticker));
+      settleReserve(bot);
+    }
   }
 }

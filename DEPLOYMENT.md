@@ -23,17 +23,25 @@ run              = ["npm", "run", "start"]
 
 ## Required secrets
 
-The deployment needs all three of these set in the **Publishing →
-Secrets** panel (the dev workspace secrets are *not* automatically
-copied):
+The deployment needs these set in the **Publishing → Secrets** panel
+(the dev workspace secrets are *not* automatically copied):
 
 - `ALPACA_KEY_ID`
 - `ALPACA_SECRET_KEY`
 - `OPERATOR_PASSWORD`
+- `SESSION_SECRET` — a long random string
 
 Without `ALPACA_*` the live price feed will fail and the bot will fall
-back to pure simulation. Without `OPERATOR_PASSWORD` the operator
-login won't accept any password.
+back to pure simulation. Every page and API route is behind the operator
+login: without `OPERATOR_PASSWORD` the server generates a random password
+at each start and prints it once to the logs. Without `SESSION_SECRET`
+every restart signs everyone out. Failed logins are throttled to 10 per
+15 minutes per client IP.
+
+With a live feed, new stock entries are only taken during the US regular
+session (9:30–16:00 ET, Mon–Fri; exchange holidays are not modelled), and a
+stock without a fresh quote holds its last price instead of being
+simulated. Crypto, forex and commodity instruments stay simulated.
 
 ## First-time publish
 

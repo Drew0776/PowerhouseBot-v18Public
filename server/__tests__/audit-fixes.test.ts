@@ -7,6 +7,8 @@
  *      line with the engine's P&L.
  *   4. Grid bots use their own price source and their reserve trade is valued
  *      from grid P&L, then settled back into cash when the bot stops.
+ *   5. A tripped breaker survives stop/start; the scan preview moves no prices;
+ *      the US session gate; backtest in-sample vs out-of-sample balances.
  *
  * Run from the project root with:   npx tsx --test server/__tests__/audit-fixes.test.ts
  */
@@ -28,9 +30,22 @@ const storageMod    = await import("../storage.js");
 const gridEngineMod = await import("../grid-engine.js");
 const authMod       = await import("../auth.js");
 const alpacaMod     = await import("../alpaca.js");
+const autoTraderMod = await import("../auto-trader.js");
 
 const { storage, sqlite, getStockData, getStockByTicker, advanceGridPrice, getGridPrice } = storageMod;
 const { createGridBot, stopGridBot, stopGridBotLoop, getGridBot, isGridReserveTrade } = gridEngineMod;
+const {
+  evaluateCircuitBreaker, isCircuitBreakerActive, resetCircuitBreaker, resetAutoTraderState,
+  startAutoTrader, stopAutoTrader, scanForBreakouts, isUsMarketOpen, runWalkForwardBacktest,
+} = autoTraderMod;
+
+const ORIG_getPortfolio = storage.getPortfolio.bind(storage);
+function fakePortfolio(totalValue: number) {
+  return {
+    totalValue, cash: totalValue, investedValue: 0, dayPnl: 0, dayPnlPercent: 0,
+    totalPnl: 0, totalPnlPercent: 0, winRate: 0, openPositions: 0, riskScore: 0, positions: [],
+  } as any;
+}
 
 function firstStock() {
   const s = getStockData().find(x => !(x as any).marketType || (x as any).marketType === "stock")!;
@@ -39,9 +54,12 @@ function firstStock() {
 
 beforeEach(() => {
   sqlite.exec("DELETE FROM trades; DELETE FROM grid_orders; DELETE FROM grid_bots;");
+  storage.getPortfolio = ORIG_getPortfolio;
+  resetAutoTraderState();
 });
 
 after(() => {
+  storage.getPortfolio = ORIG_getPortfolio;
   try { sqlite.close(); } catch { /* noop */ }
   for (const ext of ["", "-wal", "-shm"]) {
     try { fs.unlinkSync(TEST_DB + ext); } catch { /* noop */ }
@@ -144,4 +162,45 @@ test("grid reserve is valued from grid P&L and settled into cash on stop", () =>
   // Stopping again must not settle twice.
   stopGridBot(bot.id);
   assert.equal(storage.getTrades().filter(x => x.status === "closed").length, 1);
+});
+
+test("a tripped breaker survives stop/start instead of being cleared", () => {
+  storage.getPortfolio = () => fakePortfolio(1000);
+  resetCircuitBreaker();
+  evaluateCircuitBreaker(); // anchor $1000 for today
+  storage.getPortfolio = () => fakePortfolio(960); // 4% dd → tier-1 trip
+  evaluateCircuitBreaker();
+  assert.equal(isCircuitBreakerActive(), true, "precondition: tripped");
+
+  try {
+    stopAutoTrader();  // persists state
+    startAutoTrader(); // restores it — same ET day
+    assert.equal(isCircuitBreakerActive(), true, "restart must not bypass the daily-loss breaker");
+  } finally {
+    stopAutoTrader();
+  }
+});
+
+test("scan preview does not move prices", () => {
+  const before = getStockData().map(s => s.price);
+  scanForBreakouts({ advance: false });
+  assert.deepEqual(getStockData().map(s => s.price), before);
+});
+
+test("US session gate: 9:30–16:00 ET on weekdays only", () => {
+  // Dates are constructed as ET wall-clock times.
+  assert.equal(isUsMarketOpen(new Date(2026, 8, 28, 9, 29)), false);  // Mon 9:29
+  assert.equal(isUsMarketOpen(new Date(2026, 8, 28, 9, 30)), true);   // Mon 9:30
+  assert.equal(isUsMarketOpen(new Date(2026, 8, 28, 15, 59)), true);  // Mon 15:59
+  assert.equal(isUsMarketOpen(new Date(2026, 8, 28, 16, 0)), false);  // Mon 16:00
+  assert.equal(isUsMarketOpen(new Date(2026, 8, 26, 12, 0)), false);  // Sat noon
+});
+
+test("backtest reports the in-sample balance at the split, not the final one", () => {
+  const r = runWalkForwardBacktest(400);
+  const expectedOosReturn = ((r.outOfSample.finalBalance - r.inSample.finalBalance) / r.inSample.finalBalance) * 100;
+  assert.ok(
+    Math.abs(r.outOfSample.totalReturn - expectedOosReturn) < 0.05,
+    `OOS return ${r.outOfSample.totalReturn}% must be measured from the IS end balance`,
+  );
 });

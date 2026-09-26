@@ -318,6 +318,11 @@ async function runRefreshCycle(): Promise<void> {
   }
 }
 
+/** True when Alpaca keys are set, i.e. US stock prices come from the live feed. */
+export function isAlpacaConfigured(): boolean {
+  return !!(ALPACA_KEY && ALPACA_SECRET);
+}
+
 let _missingKeysWarned = false;
 export function startAlpacaFeed(): void {
   if (!ALPACA_KEY || !ALPACA_SECRET) {

@@ -8,7 +8,8 @@
  *   2. Tier 2 ($200 ≤ portfolio < $500): 5% drawdown trips, 4% does not.
  *   3. Tier 3 (portfolio < $200): 8% drawdown (DAILY_DD_LIMIT) trips.
  *   4. Hard floor: portfolio ≤ $50 trips regardless of drawdown size.
- *   5. Recovery: breaker resets once portfolio recovers above its tier limit.
+ *   5. Latching: once tripped, the breaker stays active through a recovery
+ *      and clears only on a manual reset (or a new ET trading day).
  *   6. While the breaker is active, autoTraderTick() enters no new positions
  *      (scanForBreakouts / enterTrade gated by state.circuitBreakerActive).
  *   7. ET-midnight dateKey rollover re-baselines dailyStart.value, so a fresh
@@ -180,8 +181,8 @@ test("hard floor $50: trips regardless of drawdown size", () => {
   assert.equal(isCircuitBreakerActive(), true, "$40 ≤ $50 hard-floor must trip the breaker");
 });
 
-// ── Recovery resets the breaker ──────────────────────────────────────────────
-test("breaker resets when portfolio recovers above its tier limit", () => {
+// ── The breaker latches until a manual reset ─────────────────────────────────
+test("breaker stays latched through a recovery and clears only on manual reset", () => {
   seedDailyStart(1000);
 
   // Trip: 4% drawdown at tier 1 (3% limit).
@@ -189,12 +190,17 @@ test("breaker resets when portfolio recovers above its tier limit", () => {
   evaluateCircuitBreaker();
   assert.equal(isCircuitBreakerActive(), true, "precondition: breaker is tripped");
 
-  // Recover above baseline → dd ≤ 0, totalValue > $50 → breaker must reset.
+  // Recover above baseline. A daily-loss breaker must NOT switch itself off
+  // because marks bounced back within the same day.
   storage.getPortfolio = () => fakePortfolio(1000);
   evaluateCircuitBreaker();
-  assert.equal(isCircuitBreakerActive(), false, "breaker must reset after recovery");
+  assert.equal(isCircuitBreakerActive(), true, "breaker must stay latched after recovery");
 
-  // Re-trip works after a reset (no latched state).
+  // Operator releases it.
+  resetCircuitBreaker({ manual: true });
+  assert.equal(isCircuitBreakerActive(), false, "manual reset clears the breaker");
+
+  // Re-armed from the new $1000 anchor.
   storage.getPortfolio = () => fakePortfolio(960);
   evaluateCircuitBreaker();
   assert.equal(isCircuitBreakerActive(), true, "breaker must be re-armable after reset");
@@ -408,10 +414,9 @@ test("$500 boundary: portfolio oscillating across $500 keeps the same tier and t
     "portfolio $501 must trip at the tier-1 3% limit anchored by dailyStart $520",
   );
 
-  // Recover so the breaker resets, then probe at $499.
-  storage.getPortfolio = () => fakePortfolio(520);
-  evaluateCircuitBreaker();
-  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+  // Start a fresh probe from the same $520 anchor (the breaker latches, so a
+  // recovery alone would not clear it).
+  seedDailyStart(520);
 
   storage.getPortfolio = () => fakePortfolio(499); // dd ≈ 4.04%
   evaluateCircuitBreaker();
@@ -438,9 +443,7 @@ test("$200 boundary: portfolio oscillating across $200 keeps the same tier and t
     "portfolio $200 must trip at the tier-2 5% limit anchored by dailyStart $211",
   );
 
-  storage.getPortfolio = () => fakePortfolio(211);
-  evaluateCircuitBreaker();
-  assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset before second probe");
+  seedDailyStart(211); // fresh probe from the same anchor (breaker latches)
 
   storage.getPortfolio = () => fakePortfolio(199); // dd ≈ 5.69%
   evaluateCircuitBreaker();
@@ -673,37 +676,25 @@ test("Task #65 — new-day restart: startAutoTrader DOES re-baseline dailyStart 
       "new-day restart: dd must be 0% because dailyStart was re-baselined to today's opening $499 portfolio",
     );
 
-    // Prove the baseline actually moved to $499 (not still $520). With
-    // anchor $499 we are in tier 2 (anchor < $500 → 5% limit). A $469
-    // portfolio is a 6.01% drawdown and MUST trip tier 2. Under the old
-    // (non-rolled) $520 anchor, $469 would be a 9.8% dd in tier 1
-    // (3% limit) and would also trip — so to disambiguate we ALSO check
-    // a tier-2-only case below.
+    // Prove the baseline moved to $499 (not still $520). $475 is 4.81% dd vs
+    // a $499 anchor — tier 2 (anchor < $500 → 5% limit) must NOT trip. Under
+    // the pre-restart $520 anchor it would be 8.65% dd in tier 1 (3% limit)
+    // and WOULD trip, so a non-trip here uniquely proves the re-baseline.
+    storage.getPortfolio = () => fakePortfolio(475);
+    evaluateCircuitBreaker();
+    assert.equal(
+      isCircuitBreakerActive(),
+      false,
+      "$475 is 4.81% dd vs the new $499 anchor (below tier-2 5%) and must NOT trip. Under the pre-restart $520 anchor it would be 8.65% dd in tier 1 and WOULD trip — so a non-trip proves the anchor was re-baselined.",
+    );
+
+    // And tier 2 still arms from the new anchor: $469 is a 6% drawdown.
     storage.getPortfolio = () => fakePortfolio(469);
     evaluateCircuitBreaker();
     assert.equal(
       isCircuitBreakerActive(),
       true,
       "after re-baseline to $499, a 6% drawdown ($469) must trip tier-2's 5% limit",
-    );
-
-    // Tier-2-only disambiguation: reset and probe $474 (5.01% dd vs $499
-    // anchor → trips tier-2 5%). Under the OLD $520 anchor this would be
-    // 8.85% dd in tier 1 (3% limit) and would also trip — so we instead
-    // use $475 (4.81% dd vs $499 anchor) which must NOT trip tier 2's
-    // 5% limit. Under the OLD $520 anchor $475 would be 8.65% dd in
-    // tier 1 (3% limit) and WOULD trip. So a non-trip here uniquely
-    // proves the new $499 anchor is in effect.
-    storage.getPortfolio = () => fakePortfolio(499);
-    evaluateCircuitBreaker();
-    assert.equal(isCircuitBreakerActive(), false, "precondition: breaker reset after recovery to $499");
-
-    storage.getPortfolio = () => fakePortfolio(475);
-    evaluateCircuitBreaker();
-    assert.equal(
-      isCircuitBreakerActive(),
-      false,
-      "$475 is 4.81% dd vs the new $499 anchor (below tier-2 5%) and must NOT trip. Under the pre-restart $520 anchor, $475 would be 8.65% dd in tier 1 (3% limit) and WOULD trip — so a non-trip here proves the anchor was re-baselined.",
     );
   } finally {
     Date.prototype.toLocaleString = origToLocale;
