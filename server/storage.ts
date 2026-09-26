@@ -59,6 +59,7 @@ sqlite.exec(`
 
 // getPortfolio() looks up open trades on every call.
 sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)`);
+sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_equity_curve_ts ON equity_curve(timestamp)`);
 
 // Ensure stop_loss and take_profit columns exist (migration for existing DBs)
 try {
@@ -263,7 +264,7 @@ export class DatabaseStorage implements IStorage {
 
     const positions: Position[] = [];
     let investedValue = 0;
-    let dayPnl = 0;
+
 
     for (const [ticker, pos] of posMap) {
       const stock = getStockByTicker(ticker);
@@ -273,7 +274,6 @@ export class DatabaseStorage implements IStorage {
       const avgCost = pos.totalCost / pos.shares;
       const unrealizedPnl = marketValue - pos.totalCost;
       const unrealizedPnlPercent = (unrealizedPnl / pos.totalCost) * 100;
-      const dayPnlForPos = pos.shares * stock.dayChange;
 
       positions.push({
         ticker,
@@ -286,7 +286,6 @@ export class DatabaseStorage implements IStorage {
       });
 
       investedValue += marketValue;
-      dayPnl += dayPnlForPos;
     }
 
     for (const t of gridReserves) {
@@ -307,8 +306,12 @@ export class DatabaseStorage implements IStorage {
     const totalValue = Math.round((cash + investedValue) * 100) / 100;
     const totalPnl = Math.round((totalValue - STARTING_BALANCE) * 100) / 100;
     const totalPnlPercent = Math.round((totalPnl / STARTING_BALANCE) * 10000) / 100;
-    dayPnl = Math.round(dayPnl * 100) / 100;
-    const dayPnlPercent = totalValue > 0 ? Math.round((dayPnl / (totalValue - dayPnl)) * 10000) / 100 : 0;
+    // Today's P&L against the portfolio value at the start of the ET trading
+    // day. (It used to multiply shares by each stock's seeded `dayChange`, a
+    // constant from the synthetic startup data.)
+    const dayStart = this.dayStartValue();
+    const dayPnl = Math.round((totalValue - dayStart) * 100) / 100;
+    const dayPnlPercent = dayStart > 0 ? Math.round((dayPnl / dayStart) * 10000) / 100 : 0;
 
     const winRate = agg.closedCount > 0
       ? Math.round((agg.winCount / agg.closedCount) * 10000) / 100
@@ -336,6 +339,25 @@ export class DatabaseStorage implements IStorage {
       riskScore,
       positions,
     };
+  }
+
+  /**
+   * Portfolio value at the start of today (ET): the last equity-curve point
+   * before ET midnight, else the first point today, else the starting balance.
+   */
+  dayStartValue(now: Date = new Date()): number {
+    const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const offsetMs = now.getTime() - et.getTime();          // ET → UTC
+    const etMidnight = new Date(et); etMidnight.setHours(0, 0, 0, 0);
+    const cutoff = new Date(etMidnight.getTime() + offsetMs).toISOString();
+    const before = sqlite.prepare(
+      "SELECT value FROM equity_curve WHERE timestamp < ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+    ).get(cutoff) as { value: number } | undefined;
+    if (before) return before.value;
+    const first = sqlite.prepare(
+      "SELECT value FROM equity_curve WHERE timestamp >= ? ORDER BY timestamp ASC, id ASC LIMIT 1",
+    ).get(cutoff) as { value: number } | undefined;
+    return first?.value ?? STARTING_BALANCE;
   }
 
   getSettings(): UserSettings {

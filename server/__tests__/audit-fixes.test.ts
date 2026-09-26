@@ -241,3 +241,22 @@ test("getPortfolio's SQL aggregates match the row-by-row arithmetic", () => {
   const openTickers = new Set(all.filter(t => t.status === "open").map(t => t.ticker));
   assert.equal(p.openPositions, openTickers.size);
 });
+
+test("day P&L is measured from the value at the start of the ET day", () => {
+  sqlite.exec("DELETE FROM equity_curve;");
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 36 * 3600 * 1000).toISOString();
+  // No history at all: the day starts at the starting balance.
+  assert.equal(storage.dayStartValue(now), STARTING_BALANCE);
+  // Only points from today: the first one is the day's start.
+  storage.addEquityCurvePoint({ timestamp: new Date(now.getTime() - 60_000).toISOString(), value: 490 });
+  storage.addEquityCurvePoint({ timestamp: now.toISOString(), value: 495 });
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const minutesIntoEtDay = et.getHours() * 60 + et.getMinutes();
+  if (minutesIntoEtDay > 2) assert.equal(storage.dayStartValue(now), 490);
+  // A point from before ET midnight wins.
+  storage.addEquityCurvePoint({ timestamp: yesterday, value: 480 });
+  assert.equal(storage.dayStartValue(now), 480);
+  const p = storage.getPortfolio();
+  assert.equal(p.dayPnl, Math.round((p.totalValue - 480) * 100) / 100);
+});

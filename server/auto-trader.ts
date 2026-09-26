@@ -236,10 +236,27 @@ function entryBlockReason(ticker: string): string | null {
 
 // ─── Slippage ─────────────────────────────────────────────────────────────────
 
-function slippage(shares: number, price: number, mt: string): number {
-  const rate = mt === "crypto" ? 0.001 : mt === "forex" ? 0.0002 : mt === "commodity" ? 0.0005 : mt === "index" ? 0.0003 : 0;
-  const fixed = mt === "stock" || mt === "penny" ? 0.02 * shares : 0;
-  return Math.max(0, Math.round((price * rate * shares + fixed) * 10000) / 10000);
+// Execution cost per side as a fraction of notional — roughly half the
+// typical quoted spread for the class. Stocks used to pay a flat $0.02/share,
+// which is 2.4% of a $0.85 stock but 0.01% of a $177 one; cost that doesn't
+// scale with price made cheap stocks look far worse than they trade.
+const HALF_SPREAD_BPS: Record<string, number> = { stock: 2, penny: 15, crypto: 10, forex: 1, commodity: 5, index: 3 };
+
+/**
+ * Modelled execution cost for `shares` at `price`. Zero when a live Alpaca
+ * quote exists for the ticker: those fills already happen at the ask (entry)
+ * or bid (exit), so the spread is paid in the price itself.
+ */
+function slippage(shares: number, price: number, mt: string, ticker?: string): number {
+  if (ticker && ALPACA_STOCK_TICKERS.has(ticker) && getAlpacaQuote(ticker)) return 0;
+  return modelledCost(shares, price, mt);
+}
+
+/** Half-spread cost of trading `shares` at `price` for an instrument class. */
+export function modelledCost(shares: number, price: number, mt: string): number {
+  const cls = mt === "stock" && price < 5 ? "penny" : mt;
+  const bps = HALF_SPREAD_BPS[cls] ?? HALF_SPREAD_BPS.stock;
+  return Math.max(0, Math.round(shares * price * bps / 10000 * 10000) / 10000);
 }
 
 // ─── Price Simulator — driftless random walk ─────────────────────────────────
@@ -744,7 +761,7 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
         const worst = candidates.reduce((a, b) => a.pnlPct < b.pnlPct ? a : b);
         // Force exit the worst performer
         const mt = worst.marketType;
-        const exitSlip = slippage(worst.sharesRemaining, worst.currentPrice, mt);
+        const exitSlip = slippage(worst.sharesRemaining, worst.currentPrice, mt, worst.ticker);
         const closePnl = Math.round(((worst.currentPrice - worst.entryPrice) * worst.sharesRemaining - exitSlip) * 100) / 100;
         storage.closeTrade(worst.tradeId, worst.currentPrice, exitSlip); // V17: pass slippage for P&L sync
         state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
@@ -846,7 +863,7 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
 
   // Entry slippage is folded into the entry price, the same way the backtest
   // does it, so live and backtest results are comparable.
-  const entrySlip = slippage(sig.shares, curPrice, mt);
+  const entrySlip = slippage(sig.shares, curPrice, mt, sig.ticker);
   const fillPrice = roundPrice(curPrice + entrySlip / sig.shares);
   const portfolio = storage.getPortfolio();
   const total = fillPrice * sig.shares;
@@ -969,7 +986,7 @@ function managePositions() {
     if (!pos.tier1Hit && pos.currentPrice >= pos.takeProfit1) {
       pos.tier1Hit = true;
       const halfSh = Math.round(pos.sharesRemaining * 0.40 * 10000) / 10000;
-      const exitSlip = slippage(halfSh, pos.takeProfit1, mt);
+      const exitSlip = slippage(halfSh, pos.takeProfit1, mt, pos.ticker);
       const t1pnl = Math.round(((pos.takeProfit1 - pos.entryPrice) * halfSh - exitSlip) * 100) / 100;
       // Record the partial sale in the DB so the trade log and portfolio cash
       // match the engine; the open row keeps only the remaining shares.
@@ -1053,7 +1070,7 @@ function managePositions() {
         } else {
           // Gapped past stop-limit band — fall back to current price with slippage
           fillPx = pos.currentPrice;
-          exitSlip = slippage(pos.sharesRemaining, pos.currentPrice, mt);
+          exitSlip = slippage(pos.sharesRemaining, pos.currentPrice, mt, pos.ticker);
         }
       } else {
         // Time-based / momentum / circuit-breaker exits — limit at current bid

@@ -105,3 +105,13 @@ test("backtest counts each trade once and needs 30 out-of-sample trades to rule"
     assert.match(short.verdictMessage, /at least 30/);
   }
 });
+
+test("modelled costs scale with notional, not share count", () => {
+  // $1,000 of a $100 stock: 2 bps → $0.20. The old flat $0.02/share → also $0.20.
+  assert.equal(at.modelledCost(10, 100, "stock"), 0.2);
+  // $1,000 of a $10 stock: still 2 bps → $0.20 (the old model charged $2.00).
+  assert.equal(at.modelledCost(100, 10, "stock"), 0.2);
+  // Sub-$5 stocks use the wider penny-tier spread: 15 bps → $1.50 (old: $20).
+  assert.equal(at.modelledCost(1000, 1, "stock"), 1.5);
+  assert.equal(at.modelledCost(1, 50000, "crypto"), 50);
+});
