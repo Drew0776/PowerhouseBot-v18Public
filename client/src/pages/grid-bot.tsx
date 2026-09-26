@@ -845,7 +845,7 @@ export default function GridBotPage() {
                   { label: "Unrealized P&L", value: `${summary.unrealizedPnl >= 0 ? "+" : ""}$${fmt(summary.unrealizedPnl)}`, color: pnlColor(summary.unrealizedPnl) },
                   { label: "Total P&L", value: `${summary.totalPnl >= 0 ? "+" : ""}$${fmt(summary.totalPnl)}`, color: pnlColor(summary.totalPnl) },
                   { label: "Grid Fills", value: `${summary.bot.totalGridFills}`, color: "text-[#00bcd4]" },
-                  { label: "Investment", value: `$${fmt(summary.bot.lowerPrice)}`, color: "text-zinc-300" },
+                  { label: "Investment", value: `$${fmt(summary.bot.totalInvestment)}`, color: "text-zinc-300" },
                   { label: "Profit/Grid", value: `${fmt(summary.bot.profitPerGrid)}%`, color: "text-[#00e676]" },
                   { label: "Active Level", value: `#${summary.activeLevel}`, color: "text-[#00bcd4]" },
                 ].map((kpi) => (
