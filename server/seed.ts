@@ -1,4 +1,6 @@
 import type { StockData, DailyCandle, AnalystAction, CatalystEvent, StockCategory, MarketStatus, OptionsFlowRow } from "@shared/schema";
+import { roundPrice } from "@shared/price";
+import { hashString } from "@shared/hash";
 
 // Deterministic seeded random
 function seededRandom(seed: number) {
@@ -311,10 +313,10 @@ function generateHistory(ticker: string, rand: () => number): DailyCandle[] {
 
     candles.push({
       date: dateStr,
-      open: Math.round(open * 100) / 100,
-      high: Math.round(high * 100) / 100,
-      low: Math.round(low * 100) / 100,
-      close: Math.round(close * 100) / 100,
+      open: roundPrice(open, 2),
+      high: roundPrice(high, 2),
+      low: roundPrice(low, 2),
+      close: roundPrice(close, 2),
       volume,
     });
 
@@ -325,29 +327,29 @@ function generateHistory(ticker: string, rand: () => number): DailyCandle[] {
   const lastCandle = candles[candles.length - 1];
   const scaleFactor = info.price / lastCandle.close;
   for (const c of candles) {
-    c.open = Math.round(c.open * scaleFactor * 100) / 100;
-    c.high = Math.round(c.high * scaleFactor * 100) / 100;
-    c.low = Math.round(c.low * scaleFactor * 100) / 100;
-    c.close = Math.round(c.close * scaleFactor * 100) / 100;
+    c.open = roundPrice(c.open * scaleFactor, 2);
+    c.high = roundPrice(c.high * scaleFactor, 2);
+    c.low = roundPrice(c.low * scaleFactor, 2);
+    c.close = roundPrice(c.close * scaleFactor, 2);
   }
 
   // Add MA and Bollinger data
   for (let i = 0; i < candles.length; i++) {
     if (i >= 19) {
       const slice20 = candles.slice(i - 19, i + 1);
-      candles[i].ma20 = Math.round(slice20.reduce((s, c) => s + c.close, 0) / 20 * 100) / 100;
+      candles[i].ma20 = roundPrice(slice20.reduce((s, c) => s + c.close, 0) / 20, 2);
     }
     if (i >= 29) {
       // Use full 30 candles for rough 50d MA approximation
       const sliceAll = candles.slice(0, i + 1);
-      candles[i].ma50 = Math.round(sliceAll.reduce((s, c) => s + c.close, 0) / sliceAll.length * 100) / 100;
+      candles[i].ma50 = roundPrice(sliceAll.reduce((s, c) => s + c.close, 0) / sliceAll.length, 2);
     }
     if (i >= 19 && candles[i].ma20) {
       const slice20 = candles.slice(i - 19, i + 1);
       const mean = candles[i].ma20!;
       const stddev = Math.sqrt(slice20.reduce((s, c) => s + (c.close - mean) ** 2, 0) / 20);
-      candles[i].bollingerUpper = Math.round((mean + 2 * stddev) * 100) / 100;
-      candles[i].bollingerLower = Math.round((mean - 2 * stddev) * 100) / 100;
+      candles[i].bollingerUpper = roundPrice((mean + 2 * stddev), 2);
+      candles[i].bollingerLower = roundPrice((mean - 2 * stddev), 2);
     }
   }
 
@@ -438,7 +440,7 @@ export function generateAllStocks(): StockData[] {
   const stocks: StockData[] = [];
 
   for (const ticker of Object.keys(STOCK_INFO)) {
-    const rand = seededRandom(ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0) * 137);
+    const rand = seededRandom((hashString(ticker) % 2147483646) + 1); // Park–Miller needs 1..2^31−2
     const info = STOCK_INFO[ticker];
     const history = generateHistory(ticker, rand);
 

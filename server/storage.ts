@@ -69,6 +69,8 @@ try {
 } catch (_) { /* column already exists */ }
 
 import { STARTING_BALANCE } from "@shared/constants";
+import { hashString } from "@shared/hash";
+import { roundPrice } from "@shared/price";
 export { STARTING_BALANCE };
 const EQUITY_CURVE_MAX_POINTS = 5000; // V17: raised from $100 — realistic position sizing (was too tight)
 
@@ -427,7 +429,7 @@ export function advanceGridPrice(ticker: string): number {
   tickCounts.set(ticker, n);
 
   // Unique phase offset and frequency per ticker (derived from hash)
-  const hash   = ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  const hash   = hashString(ticker);
   const phase  = (hash * 2.618) % (2 * Math.PI);          // golden-ratio spread
   const freq   = 0.08 + (hash % 7) * 0.018;               // 0.08–0.19 rad/tick
   const amp    = 0.12 + (hash % 5) * 0.03;                // 12–24% amplitude
@@ -449,7 +451,7 @@ export function advanceGridPrice(ticker: string): number {
   // Combined wave — always bounded to ±25% around mu
   const raw      = mu * (1 + amp * (primary + secondary) * 0.6 + noise);
   const newPrice = Math.max(mu * 0.75, Math.min(mu * 1.25, raw));
-  gridSimPrices.set(ticker, Math.round(newPrice * 100) / 100);
+  gridSimPrices.set(ticker, roundPrice(newPrice, 2));
 
   return newPrice;
 }

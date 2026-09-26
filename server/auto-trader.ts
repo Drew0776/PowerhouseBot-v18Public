@@ -37,6 +37,9 @@ import {
 } from "./alpaca";
 import type { StockData } from "@shared/schema";
 import { isRegularSessionOpen } from "./market-calendar";
+import { rsi as rsiOf, ema, macd, bollingerPctB, realizedVol, momentumZ } from "./indicators";
+import { roundPrice } from "@shared/price";
+import { hashString } from "@shared/hash";
 
 // ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
 //
@@ -69,10 +72,10 @@ function computeEntryLimitPrice(sig: BreakoutSignal, tol: number): number {
   const q = getAlpacaQuote(sig.ticker);
   if (q && q.ask > 0 && q.bid > 0) {
     // Pay at most ask + tol (just-inside-ask, with tolerance for fast tape).
-    return Math.round(Math.min(q.ask, q.mid * (1 + tol)) * 10000) / 10000;
+    return roundPrice(Math.min(q.ask, q.mid * (1 + tol)));
   }
   // No live quote — fall back to signal entry price with tolerance.
-  return Math.round(sig.entryPrice * (1 + tol) * 10000) / 10000;
+  return roundPrice(sig.entryPrice * (1 + tol));
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -269,7 +272,7 @@ function advancePrice(ticker: string, mt: string): number {
       const g = _prices.get(ticker);
       const stock = getStockByTicker(ticker);
       if (!g) {
-        const h = ticker.split("").reduce((a: number, c: string) => a + c.charCodeAt(0), 0) * 137;
+        const h = hashString(ticker);
         _prices.set(ticker, { price: realPrice, lcg: h });
         _seeds.set(ticker, realPrice);
       } else {
@@ -296,7 +299,7 @@ function advancePrice(ticker: string, mt: string): number {
   const seed = _seeds.get(ticker)!;
 
   if (!_prices.has(ticker)) {
-    const h = ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+    const h = hashString(ticker);
     _prices.set(ticker, { price: stock.price, lcg: h });
   }
   const g = _prices.get(ticker)!;
@@ -314,7 +317,7 @@ function advancePrice(ticker: string, mt: string): number {
 
   // Bound ±55% from seed
   g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price));  // V11: ±80% bounds (was ±55%)
-  g.price = Math.round(g.price * 10000) / 10000;
+  g.price = roundPrice(g.price);
 
   // Update storage cache
   const all = getStockData();
@@ -324,37 +327,90 @@ function advancePrice(ticker: string, mt: string): number {
   return g.price;
 }
 
-// ─── ATR Estimation — Audit-Corrected ────────────────────────────────────────
-// V9: ATR = price × tickVol × √20 (no extra multiplier that bloated ATR in V8)
+// ─── Price history ───────────────────────────────────────────────────────────
+// One sample per instrument per engine tick, so every indicator sees evenly
+// spaced data. (Samples used to arrive per tick, again for open positions, and
+// again on every Alpaca quote, which made the spacing irregular.)
 
-function estimateATR(ticker: string, mt: string, price: number): number {
-  const vol = getVol(ticker, mt);
-  return Math.max(0.0001, Math.round(price * vol * Math.sqrt(20) * 10000) / 10000);
-}
-
-// ─── MTF Trend Check ─────────────────────────────────────────────────────────
-
+const HIST_LEN = 120;           // 4 minutes of 2-second ticks
+const MIN_BARS = 21;            // RSI(14), %B(20), EMA(21) and σ(20) all defined
 const _mtf = new Map<string, number[]>();
 
-function updateMTF(ticker: string, price: number) {
-  const h = _mtf.get(ticker) ?? [];
+function sampleHistory(hist: Map<string, number[]>, ticker: string, price: number): void {
+  if (!(price > 0)) return;
+  const h = hist.get(ticker) ?? [];
   h.push(price);
-  if (h.length > 20) h.shift();
-  _mtf.set(ticker, h);
+  if (h.length > HIST_LEN) h.shift();
+  hist.set(ticker, h);
 }
 
-/** Bug 7 fix: Allow Alpaca price-refresh loop to push bars into MTF for all tickers */
-export function pushMtfBar(ticker: string, price: number): void {
-  updateMTF(ticker, price);
+/** Recent 3-sample average not clearly below the one 20 samples back. */
+function trendGate(h: number[]): boolean {
+  if (h.length < 6) return true; // not enough data → allow (scoring still needs MIN_BARS)
+  const w = h.slice(-20);
+  const earlyAvg  = (w[0] + w[1] + w[2]) / 3;
+  const recentAvg = (w[w.length-1] + w[w.length-2] + w[w.length-3]) / 3;
+  return recentAvg >= earlyAvg * 0.996; // allow entry unless clear -0.4%+ downtrend
 }
 
 function isTrendingUp(ticker: string): boolean {
-  const h = _mtf.get(ticker) ?? [];
-  if (h.length < 6) return true; // not enough data → allow
-  const earlyAvg  = (h[0] + h[1] + h[2]) / 3;
-  const recentAvg = (h[h.length-1] + h[h.length-2] + h[h.length-3]) / 3;
-  return recentAvg >= earlyAvg * 0.996; // allow entry unless clear -0.4%+ downtrend
+  return trendGate(_mtf.get(ticker) ?? []);
 }
+
+// ─── Features computed from the price series ─────────────────────────────────
+// These replace the seeded RSI / "MACD" / Bollinger / trend fields, which were
+// generated once at startup from synthetic daily candles and never changed, so
+// the ranking was frozen for the life of the process. Fundamentals the bot has
+// no real source for (catalyst, short interest, volume spikes) no longer feed
+// the trading decision.
+
+export interface PriceFeatures {
+  bars: number;
+  rsi: number;              // Wilder RSI(14)
+  pctB: number;             // Bollinger %B(20, 2)
+  emaFast: number;          // EMA(9)
+  emaSlow: number;          // EMA(21)
+  macdHist: number | null;  // MACD(12, 26, 9) histogram; null until 34 samples
+  sigma: number;            // realized σ of one-tick log returns (up to 60)
+  momZ: number | null;      // 5-tick log return in σ·√5 units
+}
+
+export function featuresFrom(h: number[]): PriceFeatures | null {
+  if (h.length < MIN_BARS) return null;
+  const r = rsiOf(h, 14), b = bollingerPctB(h, 20, 2);
+  const ef = ema(h, 9), es = ema(h, 21);
+  const sigma = realizedVol(h, Math.min(60, h.length - 1));
+  if (r === null || b === null || ef === null || es === null || sigma === null) return null;
+  return {
+    bars: h.length, rsi: r, pctB: b, emaFast: ef, emaSlow: es,
+    macdHist: macd(h)?.hist ?? null, sigma, momZ: momentumZ(h, 5, sigma),
+  };
+}
+
+function featuresFor(ticker: string): PriceFeatures | null {
+  return featuresFrom(_mtf.get(ticker) ?? []);
+}
+
+// ─── ATR from realized volatility ────────────────────────────────────────────
+// ATR ≈ price × σ_tick × √20 — the typical 20-tick move. σ is measured from the
+// instrument's own recent prices; the class constant is only a fallback while
+// history is short. Floors keep stops from sitting inside the quoted spread or
+// collapsing on a flat tape: 5 bps of price, or the live bid-ask spread.
+
+function atrFrom(price: number, sigma: number | null, fallbackVol: number, spread = 0): number {
+  const s = sigma && sigma > 0 ? sigma : fallbackVol;
+  return roundPrice(Math.max(price * s * Math.sqrt(20), price * 0.0005, spread));
+}
+
+function estimateATR(ticker: string, mt: string, price: number): number {
+  const f = featuresFor(ticker);
+  const q = ALPACA_STOCK_TICKERS.has(ticker) ? getAlpacaQuote(ticker) : null;
+  const spread = q && q.ask > q.bid && q.bid > 0 ? q.ask - q.bid : 0;
+  return atrFrom(price, f?.sigma ?? null, getVol(ticker, mt), spread);
+}
+
+/** Stop never at or below zero: at least 1% of the entry price. */
+const stopFloor = (price: number) => price * 0.01;
 
 // ─── FINDING 3 FIX: Rank-Based Selection ─────────────────────────────────────
 // Instead of absolute score (everything = 100), compute a COMPOSITE RANK
@@ -371,103 +427,61 @@ function isTrendingUp(ticker: string): boolean {
 interface RankedSignal {
   ticker: string;
   compositeScore: number; // 0-100 composite rank score
-  rsi: number;
-  volSpike: number;
-  momentum: number;
-  catalyst: number;
+  features: PriceFeatures;
   mt: string;
   grade: "A+" | "A" | "B" | "C";
   reasons: string[];
   strategy: "momentum" | "squeeze" | "reversal" | "breakout";
 }
 
-function computeCompositeScore(s: StockData, mt: string): number | null {
-  const isCrypto = mt === "crypto";
-  const isForex  = mt === "forex";
-  const isAlt    = isCrypto || isForex || mt === "commodity" || mt === "index";
+/**
+ * Composite score (0–100) from price-derived features only:
+ *   45%  RSI quality — peaks at 70 for stocks, 65 for other classes
+ *   55%  trend — EMA(9) above EMA(21): 50, MACD histogram > 0: 30,
+ *        5-tick momentum: up to 20 at +2σ
+ * Full weight when RSI is 65–75 with both trend confirmations, ×0.92 with the
+ * EMA confirmation only, ×0.8 otherwise.
+ * Null (not tradeable) when RSI is outside 35–88 or, for stocks, %B < 0.15.
+ */
+function computeCompositeScore(f: PriceFeatures, mt: string): number | null {
+  const isAlt = mt === "crypto" || mt === "forex" || mt === "commodity" || mt === "index";
 
   // Hard disqualifiers
-  if (s.rsi < 35 || s.rsi > 88) return null;
-  if (!isAlt && s.bollingerPosition < 15) return null;
+  if (f.rsi < 35 || f.rsi > 88) return null;
+  if (!isAlt && f.pctB < 0.15) return null;
 
-  // RSI quality: peak at RSI=70 for stocks, 65 for alts
   const rsiTarget = isAlt ? 65 : 70;
   const rsiWidth  = isAlt ? 20 : 18;
-  const rsiScore = Math.max(0, 100 - Math.abs(s.rsi - rsiTarget) * (100 / rsiWidth));
+  const rsiScore = Math.max(0, 100 - Math.abs(f.rsi - rsiTarget) * (100 / rsiWidth));
 
-  // Volume score: log-scaled spike ratio
-  const volScore = s.volumeSpikeRatio >= 3.0 ? 100
-                 : s.volumeSpikeRatio >= 2.0 ? 85
-                 : s.volumeSpikeRatio >= 1.5 ? 70
-                 : s.volumeSpikeRatio >= 1.2 ? 55
-                 : s.volumeSpikeRatio >= 0.9 ? 35
-                 : 10;
+  const up = f.emaFast > f.emaSlow;
+  const macdUp = f.macdHist !== null && f.macdHist > 0;
+  let trend = 0;
+  if (up) trend += 50;
+  if (macdUp) trend += 30;
+  if (f.momZ !== null) trend += Math.max(0, Math.min(20, f.momZ * 10));
 
-  // Momentum score: trend alignment + day change (or real-price ROC when Alpaca live)
-  let momScore = 0;
-  if ((s as any).ma20dAlignment === "Above") momScore += 50;
-  if (s.macdSignal === 20) momScore += 30;
-
-  // V19: Real-price momentum — replace simulated dayChangePercent drift component with
-  // actual 5-bar ROC when a valid live Alpaca price is available for this ticker.
-  // Tickers with no live price or insufficient bar history fall back to the simulated drift.
-  const _livePrice = getAlpacaPrice(s.ticker);
-  if (_livePrice != null) {
-    const hist = _mtf.get(s.ticker) ?? [];
-    if (hist.length >= 5) {
-      const roc5 = (hist[hist.length - 1] - hist[hist.length - 5]) / hist[hist.length - 5];
-      // Map: negative ROC → 0 pts, +2% ROC → 25 pts (replaces dayChangePercent component)
-      const rocScore = Math.max(0, Math.min(25, (roc5 / 0.02) * 25));
-      momScore += rocScore;
-    } else {
-      // Alpaca-tracked but fewer than 5 bars yet — use simulated drift as transient fallback
-      if (s.dayChangePercent > 2)  momScore += 20;
-      else if (s.dayChangePercent > 0.5) momScore += 10;
-      else if (s.dayChangePercent < -2)  momScore -= 20;
-    }
-  } else {
-    // No live Alpaca price — keep original simulated drift component unchanged
-    if (s.dayChangePercent > 2)  momScore += 20;
-    else if (s.dayChangePercent > 0.5) momScore += 10;
-    else if (s.dayChangePercent < -2)  momScore -= 20;
-  }
-  momScore = Math.max(0, Math.min(100, momScore));
-
-  // Catalyst score: direct
-  const catScore = Math.min(100, Math.max(0, s.catalystScore ?? 50));
-
-  // Composite: weighted sum
-  let composite = rsiScore * 0.40 + volScore * 0.30 + momScore * 0.20 + catScore * 0.10;
-
-  // V12: Enhanced score multipliers — wider spread, better A+ selection
-  // MACD + Volume ≥ 2.0× = golden signal → +30% (was +25%)
-  if (s.macdSignal === 20 && s.volumeSpikeRatio >= 2.0) composite *= 1.30;
-  // RSI sweet spot 65-75 + uptrend + MACD = triple confirmation → +25%
-  if (s.rsi >= 65 && s.rsi <= 75 && (s as any).ma20dAlignment === "Above" && s.macdSignal === 20) composite *= 1.25;
-  else if (s.rsi >= 65 && s.rsi <= 75 && (s as any).ma20dAlignment === "Above") composite *= 1.15;
-  // Squeeze setup → +20%
-  if (s.shortInterestPct >= 20 && s.floatShares < 50) composite *= 1.20;
-  // High catalyst + strong volume → +15% (news catalyst is extra edge)
-  if (s.catalystScore >= 80 && s.volumeSpikeRatio >= 1.5) composite *= 1.15;
-  // (Fixed per-ticker boosts for ACHR/IREN/LINK/AVAX were removed: they were
-  // tuned to earlier simulator runs, not to any property of the instrument.)
-
-  // Cap at 100
-  composite = Math.min(100, composite);
-
-  return Math.round(composite * 10) / 10;
+  // Confluence is applied as a discount on setups without it rather than a
+  // bonus on those with it: same relative ordering, but scores stay within
+  // 0–100 instead of piling up at a 100 cap where the ranking becomes arbitrary.
+  const base = rsiScore * 0.45 + trend * 0.55;
+  const sweet = f.rsi >= 65 && f.rsi <= 75;
+  const factor = sweet && up && macdUp ? 1 : sweet && up ? 0.92 : 0.8;
+  return Math.round(base * factor * 10) / 10;
 }
 
 // ─── Market Regime ────────────────────────────────────────────────────────────
 
 function detectRegime(): "trending" | "ranging" {
-  const all = getStockData();
-  const stocks = all.filter(s => !(s as any).marketType || (s as any).marketType === "stock");
   let up = 0, down = 0;
-  for (const s of stocks) {
-    if ((s as any).ma20dAlignment === "Above") up++; else down++;
+  for (const s of getStockData()) {
+    if ((s as any).marketType && (s as any).marketType !== "stock") continue;
+    const f = featuresFor(s.ticker);
+    if (!f) continue;
+    if (f.emaFast > f.emaSlow) up++; else down++;
   }
-  const tot = Math.max(stocks.length, 1);
+  const tot = up + down;
+  if (tot === 0) return "ranging";
   return Math.abs(up - down) / tot > 0.18 ? "trending" : "ranging";
 }
 
@@ -516,12 +530,12 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
   for (const s of advance ? all : []) {
     const mt = (s as any).marketType ?? "stock";
     if (openTickers.has(s.ticker)) {
-      // Already advanced in managePositions — just update MTF with current price
+      // Already advanced in managePositions — sample its current price once
       const g = _prices.get(s.ticker);
-      updateMTF(s.ticker, g ? g.price : s.price);
+      sampleHistory(_mtf, s.ticker, g ? g.price : s.price);
     } else {
       const newPrice = advancePrice(s.ticker, mt);
-      updateMTF(s.ticker, newPrice > 0 ? newPrice : s.price);
+      sampleHistory(_mtf, s.ticker, newPrice > 0 ? newPrice : s.price);
     }
   }
 
@@ -531,32 +545,30 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
   for (const s of all) {
     const mt = (s as any).marketType ?? "stock";
 
+    // Needs enough evenly spaced history for the indicators
+    const f = featuresFor(s.ticker);
+    if (!f) continue;
+
     // MTF gate
     if (!isTrendingUp(s.ticker)) continue;
 
-    const composite = computeCompositeScore(s, mt);
+    const composite = computeCompositeScore(f, mt);
     if (composite === null || composite < 20) continue; // absolute floor only
 
-    let strategy: "momentum" | "squeeze" | "reversal" | "breakout" = "momentum";
-    if (s.shortInterestPct >= 20 && s.floatShares < 300) strategy = "squeeze";
-    else if (s.volumeSpikeRatio >= 2.5) strategy = "breakout";
+    const strategy: RankedSignal["strategy"] = f.pctB >= 1 ? "breakout" : "momentum";
 
     const reasons: string[] = [];
-    if (s.rsi >= 60 && s.rsi <= 80) reasons.push(`RSI ${s.rsi}`);
-    if (s.macdSignal === 20) reasons.push("MACD ✓");
-    if (s.volumeSpikeRatio >= 1.3) reasons.push(`Vol ${s.volumeSpikeRatio.toFixed(1)}×`);
-    if ((s as any).ma20dAlignment === "Above") reasons.push("Uptrend");
-    if (s.shortInterestPct >= 15) reasons.push(`SI ${s.shortInterestPct.toFixed(0)}%`);
-    if (s.catalystScore >= 70) reasons.push(`Cat ${s.catalystScore}`);
+    if (f.rsi >= 60 && f.rsi <= 80) reasons.push(`RSI ${Math.round(f.rsi)}`);
+    if (f.macdHist !== null && f.macdHist > 0) reasons.push("MACD ✓");
+    if (f.emaFast > f.emaSlow) reasons.push("EMA9 > EMA21");
+    reasons.push(`%B ${f.pctB.toFixed(2)}`);
+    if (f.momZ !== null && f.momZ >= 1) reasons.push(`Mom +${f.momZ.toFixed(1)}σ`);
 
     // Grade by composite rank (will be assigned after sorting)
     ranked.push({
       ticker: s.ticker,
       compositeScore: composite,
-      rsi: s.rsi,
-      volSpike: s.volumeSpikeRatio,
-      momentum: s.dayChangePercent ?? 0,
-      catalyst: s.catalystScore ?? 50,
+      features: f,
       mt,
       grade: "B",  // placeholder
       reasons,
@@ -581,10 +593,10 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
 
     const price = s.price;
     const atr   = estimateATR(r.ticker, r.mt, price);
-    const stop  = Math.max(0.0001, Math.round((price - STOP_MULT  * atr) * 10000) / 10000);
-    const tp1   = Math.round((price + TP1_MULT  * atr) * 10000) / 10000;
-    const tp2   = Math.round((price + TP2_MULT  * atr) * 10000) / 10000;
-    const rr    = (tp1 - price) / Math.max(price - stop, 0.0001);
+    const stop  = Math.max(stopFloor(price), roundPrice(price - STOP_MULT * atr));
+    const tp1   = roundPrice(price + TP1_MULT * atr);
+    const tp2   = roundPrice(price + TP2_MULT * atr);
+    const rr    = (tp1 - price) / Math.max(price - stop, price * 1e-6);
 
     if (portfolio.cash < 1) continue;
     let { posSize, kf } = sizePosition(r.compositeScore, portfolio);
@@ -827,7 +839,7 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   // Entry slippage is folded into the entry price, the same way the backtest
   // does it, so live and backtest results are comparable.
   const entrySlip = slippage(sig.shares, curPrice, mt);
-  const fillPrice = Math.round((curPrice + entrySlip / sig.shares) * 10000) / 10000;
+  const fillPrice = roundPrice(curPrice + entrySlip / sig.shares);
   const portfolio = storage.getPortfolio();
   const total = fillPrice * sig.shares;
   if (total > portfolio.cash) { cancelPending(pending, "insufficient_cash"); return null; }
@@ -837,8 +849,8 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   // signal's mid, keeping their ATR distances. Anchored to the mid, T1 could
   // sit below break-even once costs are charged and "lock in" a loss.
   const shift = fillPrice - sig.entryPrice;
-  const at = (px: number) => Math.max(0.0001, Math.round((px + shift) * 10000) / 10000);
-  const stopLoss = at(sig.stopLoss);
+  const at = (px: number) => roundPrice(px + shift);
+  const stopLoss = Math.max(stopFloor(fillPrice), at(sig.stopLoss));
   const takeProfit1 = at(sig.takeProfit1);
   const takeProfit2 = at(sig.takeProfit2);
 
@@ -929,11 +941,10 @@ function managePositions() {
     const newPrice = advancePrice(pos.ticker, mt);
     const cur = newPrice > 0 ? newPrice : stock.price;
 
-    pos.currentPrice = Math.round(cur * 10000) / 10000;
+    pos.currentPrice = roundPrice(cur);
     pos.pnl = Math.round((pos.currentPrice - pos.entryPrice) * pos.sharesRemaining * 100) / 100;
     pos.pnlPct = Math.round(((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 10000) / 100;
     pos.ticksOpen++;
-    updateMTF(pos.ticker, pos.currentPrice);
 
     // Update high water mark + trailing stop (after T1 only)
     if (pos.currentPrice > pos.highWaterMark) {
@@ -941,7 +952,7 @@ function managePositions() {
       if (pos.tier1Hit) {
         const profPct = (pos.highWaterMark - pos.entryPrice) / pos.entryPrice * 100;
         const tm = profPct > 20 ? 0.5 : profPct > 10 ? 0.7 : TRAIL_MULT;
-        const newTrail = Math.round((pos.highWaterMark - tm * pos.atr) * 10000) / 10000;
+        const newTrail = roundPrice(pos.highWaterMark - tm * pos.atr);
         if (newTrail > pos.trailingStop) pos.trailingStop = newTrail;
       }
     }
@@ -1001,7 +1012,7 @@ function managePositions() {
       log(`⚡ GATE EXIT | ${pos.ticker} | ${pos.pnlPct.toFixed(2)}% @ tick ${pos.ticksOpen} — clearly losing`);
     }
     // Priority 6: RSI momentum collapse
-    else if (stock.rsi < 35 && pos.pnlPct < -5 && !pos.tier1Hit) {
+    else if ((featuresFor(pos.ticker)?.rsi ?? 50) < 35 && pos.pnlPct < -5 && !pos.tier1Hit) {
       exitReason = "momentum_exit";
       exitStatus = "momentum_exit";
     }
@@ -1240,7 +1251,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 
   const lPrices = new Map<string, PriceState>();
   for (const s of all) {
-    const h = s.ticker.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+    const h = hashString(s.ticker);
     lPrices.set(s.ticker, { price: s.price, lcg: h + 54321 });
   }
 
@@ -1258,7 +1269,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
     const vol = getVol(ticker, mt);
     g.price = Math.max(seed * 0.20, Math.min(seed * 1.80, g.price * (1 + vol * z)));  // V11: ±80%
-    g.price = Math.round(g.price * 10000) / 10000;
+    g.price = roundPrice(g.price);
     return g.price;
   }
 
@@ -1278,10 +1289,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
 
     for (const s of all) {
       const mt = (s as any).marketType ?? "stock";
-      const p = lAdvance(s.ticker, mt);
-      const mh = lMTF.get(s.ticker) ?? [];
-      mh.push(p); if (mh.length > 20) mh.shift();
-      lMTF.set(s.ticker, mh);
+      sampleHistory(lMTF, s.ticker, lAdvance(s.ticker, mt));
     }
 
 
@@ -1344,19 +1352,16 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
       if (!g) continue;
       const mt = (s as any).marketType ?? "stock";
 
-      // MTF check
+      // Same features and gates as the live engine, from this run's own paths
       const mh = lMTF.get(s.ticker) ?? [];
-      if (mh.length >= 6) {
-        const ea = (mh[0]+mh[1]+mh[2])/3;
-        const ra = (mh[mh.length-1]+mh[mh.length-2]+mh[mh.length-3])/3;
-        if (ra < ea * 0.996) continue;
-      }
+      const f = featuresFrom(mh);
+      if (!f || !trendGate(mh)) continue;
 
-      const composite = computeCompositeScore(s, mt);
+      const composite = computeCompositeScore(f, mt);
       if (!composite || composite < 20) continue;
 
-      const atr  = estimateATR(s.ticker, mt, g.price);
-      const stop = Math.max(0.0001, g.price - STOP_MULT * atr);
+      const atr  = atrFrom(g.price, f.sigma, getVol(s.ticker, mt));
+      const stop = Math.max(stopFloor(g.price), g.price - STOP_MULT * atr);
       const tp1  = g.price + TP1_MULT * atr;
       const tp2  = g.price + TP2_MULT * atr;
 
@@ -1463,7 +1468,7 @@ export function startAutoTrader() {
   // during the downtime rather than waiting for GBM to drift back to those levels.
   for (const pos of restoredPositions) {
     const seedPrice = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
-    const h = pos.ticker.split("").reduce((a: number, c: string) => a + c.charCodeAt(0), 0) * 137;
+    const h = hashString(pos.ticker);
     _prices.set(pos.ticker, { price: seedPrice, lcg: h });
     _seeds.set(pos.ticker, seedPrice);
   }
@@ -1610,6 +1615,7 @@ export function stopAutoTrader() {
 // gated by warm-up, by markets being flat, or actually trading?" without
 // reading server logs.
 export type ScanDebugGate =
+  | "warmup"
   | "mtf"
   | "rsi"
   | "bollinger"
@@ -1652,19 +1658,22 @@ export function getScanDebug(): ScanDebugSnapshot {
     let gateFailed: ScanDebugGate = null;
     let score: number | null = null;
 
+    const f = featuresFrom(mtfHist);
     if (openTickers.has(s.ticker)) {
       // Scanner still ranks open positions, but they can't be re-entered.
       // Surface that so an operator doesn't wonder why an A+ candidate
       // never converts to a new entry.
       gateFailed = "open_position";
+    } else if (!f) {
+      gateFailed = "warmup"; // fewer than MIN_BARS evenly spaced samples yet
     } else if (!isTrendingUp(s.ticker)) {
       gateFailed = "mtf";
-    } else if (s.rsi < 35 || s.rsi > 88) {
+    } else if (f.rsi < 35 || f.rsi > 88) {
       gateFailed = "rsi";
-    } else if (!isAlt && s.bollingerPosition < 15) {
+    } else if (!isAlt && f.pctB < 0.15) {
       gateFailed = "bollinger";
     } else {
-      score = computeCompositeScore(s, mt);
+      score = computeCompositeScore(f, mt);
       if (score === null || score < 20) {
         gateFailed = "score";
       } else {
