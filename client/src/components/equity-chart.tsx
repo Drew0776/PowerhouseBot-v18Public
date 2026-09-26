@@ -1,6 +1,7 @@
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid,
 } from "recharts";
+import { STARTING_BALANCE } from "@shared/constants";
 
 interface EquityChartProps {
   data: { id: number; timestamp: string; value: number }[];
@@ -11,10 +12,10 @@ export default function EquityChart({ data, hasTrades = true }: EquityChartProps
   const isEmpty = !hasTrades;
 
   const chartData = isEmpty
-    ? [{ time: "Start", value: 100, spy: 100 }, { time: "Now", value: 100, spy: 100 }]
+    ? [{ time: "Start", value: STARTING_BALANCE, spy: STARTING_BALANCE }, { time: "Now", value: STARTING_BALANCE, spy: STARTING_BALANCE }]
     : data.map((d, i) => {
         const date = new Date(d.timestamp);
-        const spyValue = 100 * (1 + 0.0003 * i);
+        const spyValue = STARTING_BALANCE * (1 + 0.0003 * i);
         return {
           time: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
           value: d.value,
@@ -24,7 +25,7 @@ export default function EquityChart({ data, hasTrades = true }: EquityChartProps
 
   // If only 1 data point, add a starting point
   if (!isEmpty && chartData.length === 1) {
-    chartData.unshift({ time: "Start", value: 100, spy: 100 });
+    chartData.unshift({ time: "Start", value: STARTING_BALANCE, spy: STARTING_BALANCE });
   }
 
   return (

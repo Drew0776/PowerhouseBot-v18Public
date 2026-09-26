@@ -4,8 +4,11 @@ const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    // Session expired or never logged in — send the operator to the login page.
+    // Session expired or never logged in — mark the session logged out so
+    // AppRouter's cached auth check doesn't bounce /login straight back to /,
+    // then send the operator to the login page.
     if (res.status === 401 && !res.url.endsWith("/api/auth/login")) {
+      queryClient.setQueryData(["/api/auth/check"], { authenticated: false });
       window.location.hash = "/login";
     }
     const text = (await res.text()) || res.statusText;
