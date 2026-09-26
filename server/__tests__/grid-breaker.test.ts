@@ -5,9 +5,9 @@
  *   1. A >drawdown-limit portfolio loss trips the global circuit breaker mid-tick;
  *      the bot transitions to `paused_by_breaker`, its open buys are flattened
  *      at market, and subsequent ticks place no further fills.
- *   2. The breaker latches: a portfolio recovery alone leaves bots parked; after
- *      the operator's manual reset `watchBreakerResume()` transitions them back
- *      to `active` and ticking resumes.
+ *   2. Portfolio recovery + `watchBreakerResume()` transitions paused bots back
+ *      to `active` and ticking resumes — while the auto-trader's own breaker
+ *      stays latched until a manual reset.
  *   3. Restart-survival: after dropping all in-memory engine state, calling
  *      `bootGridEngine()` rebuilds the same level indices, open-buy map, and
  *      realized P&L — no duplicate fills.
@@ -46,7 +46,7 @@ const {
   computeBotLevels,
   shutdownGridEngine,
 } = gridEngineMod;
-const { resetAutoTraderState, resetCircuitBreaker } = autoTraderMod;
+const { resetAutoTraderState, isCircuitBreakerActive } = autoTraderMod;
 
 const ORIG_getPortfolio = storage.getPortfolio.bind(storage);
 
@@ -172,7 +172,7 @@ test("circuit breaker pauses grid bot, flattens open buys, halts further fills",
   );
 });
 
-test("watchBreakerResume re-activates parked bots after the breaker is manually reset", () => {
+test("watchBreakerResume re-activates parked bots once portfolio recovers", () => {
   const { ticker, seedPrice } = pickTicker();
   const lower = Math.round(seedPrice * 0.7 * 100) / 100;
   const upper = Math.round(seedPrice * 1.3 * 100) / 100;
@@ -192,17 +192,17 @@ test("watchBreakerResume re-activates parked bots after the breaker is manually 
   tickGridBot(bot.id);
   assert.equal(getGridBot(bot.id)!.status, "paused_by_breaker");
 
-  // Portfolio recovers above the limit — the breaker is latched, so bots stay parked.
+  // Portfolio recovers above the limit.
   storage.getPortfolio = () => fakePortfolio(1000);
-  watchBreakerResume();
-  assert.equal(getGridBot(bot.id)!.status, "paused_by_breaker", "recovery alone must not resume a latched breaker");
-
-  // Operator resets the breaker; the watcher then resumes parked bots.
-  resetCircuitBreaker({ manual: true });
   watchBreakerResume();
 
   const resumed = getGridBot(bot.id)!;
-  assert.equal(resumed.status, "active", "bot resumed after manual breaker reset");
+  assert.equal(resumed.status, "active", "bot resumed after breaker recovery");
+  assert.equal(
+    isCircuitBreakerActive(),
+    true,
+    "the auto-trader's breaker stays latched — only grid bots auto-resume",
+  );
 
   // After resumption, ticks must once again be able to record fills.
   stopGridBotLoop(bot.id); // ignore the loop watchBreakerResume started
@@ -210,6 +210,11 @@ test("watchBreakerResume re-activates parked bots after the breaker is manually 
   for (let i = 0; i < 25; i++) tickGridBot(bot.id);
   const after = getGridOrders(bot.id).length;
   assert.ok(after >= before, "ticking resumes after breaker clears (no regression)");
+  assert.equal(
+    getGridBot(bot.id)!.status,
+    "active",
+    "a resumed bot must keep trading while the auto-trader's breaker is still latched, not be re-parked",
+  );
 });
 
 test("restart-survival: bootGridEngine replays SQLite state without duplicate fills", () => {
