@@ -57,6 +57,9 @@ sqlite.exec(`
   );
 `);
 
+// getPortfolio() looks up open trades on every call.
+sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)`);
+
 // Ensure stop_loss and take_profit columns exist (migration for existing DBs)
 try {
   sqlite.exec(`ALTER TABLE trades ADD COLUMN stop_loss REAL`);
@@ -227,20 +230,21 @@ export class DatabaseStorage implements IStorage {
   }
 
   getPortfolio(): PortfolioSummary {
-    const allTrades = this.getTrades();
-    const openTrades = allTrades.filter((t) => t.status === "open");
-    const closedTrades = allTrades.filter((t) => t.status === "closed");
+    // Called several times per engine tick and per grid tick, so the closed
+    // history is summed in SQL rather than loaded row by row; only open trades
+    // come back as rows. Same arithmetic as before: every buy spends its total,
+    // every closed trade with a P&L returns total + pnl.
+    const agg = sqlite.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN action = 'buy' THEN total ELSE 0 END), 0)                          AS spent,
+        COALESCE(SUM(CASE WHEN status = 'closed' AND pnl IS NOT NULL THEN total + pnl ELSE 0 END), 0) AS returned,
+        COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0)                          AS closedCount,
+        COALESCE(SUM(CASE WHEN status = 'closed' AND pnl > 0 THEN 1 ELSE 0 END), 0)              AS winCount
+      FROM trades
+    `).get() as { spent: number; returned: number; closedCount: number; winCount: number };
+    const openTrades = db.select().from(trades).where(eq(trades.status, "open")).orderBy(desc(trades.id)).all();
 
-    // Calculate cash remaining
-    let cash = STARTING_BALANCE;
-    for (const t of allTrades) {
-      if (t.action === "buy") {
-        cash -= t.total;
-      }
-      if (t.status === "closed" && t.pnl !== null) {
-        cash += t.total + t.pnl;
-      }
-    }
+    const cash = STARTING_BALANCE - agg.spent + agg.returned;
 
     const reserveValues = gridReserveValuer?.() ?? new Map<number, number>();
     const gridReserves = openTrades.filter((t) => reserveValues.has(t.id));
@@ -304,9 +308,8 @@ export class DatabaseStorage implements IStorage {
     dayPnl = Math.round(dayPnl * 100) / 100;
     const dayPnlPercent = totalValue > 0 ? Math.round((dayPnl / (totalValue - dayPnl)) * 10000) / 100 : 0;
 
-    const winningTrades = closedTrades.filter((t) => t.pnl !== null && t.pnl > 0).length;
-    const winRate = closedTrades.length > 0
-      ? Math.round((winningTrades / closedTrades.length) * 10000) / 100
+    const winRate = agg.closedCount > 0
+      ? Math.round((agg.winCount / agg.closedCount) * 10000) / 100
       : 0;
 
     // Risk score: based on concentration and position count

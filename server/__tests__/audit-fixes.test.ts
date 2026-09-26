@@ -32,7 +32,7 @@ const authMod       = await import("../auth.js");
 const alpacaMod     = await import("../alpaca.js");
 const autoTraderMod = await import("../auto-trader.js");
 
-const { storage, sqlite, getStockData, getStockByTicker, advanceGridPrice, getGridPrice } = storageMod;
+const { storage, sqlite, getStockData, getStockByTicker, advanceGridPrice, getGridPrice, STARTING_BALANCE } = storageMod;
 const { createGridBot, stopGridBot, stopGridBotLoop, getGridBot, isGridReserveTrade } = gridEngineMod;
 const {
   evaluateCircuitBreaker, isCircuitBreakerActive, resetCircuitBreaker, resetAutoTraderState,
@@ -203,4 +203,41 @@ test("backtest reports the in-sample balance at the split, not the final one", (
     Math.abs(r.outOfSample.totalReturn - expectedOosReturn) < 0.05,
     `OOS return ${r.outOfSample.totalReturn}% must be measured from the IS end balance`,
   );
+});
+
+test("getPortfolio's SQL aggregates match the row-by-row arithmetic", () => {
+  const tickers = getStockData().slice(0, 4).map(s => s.ticker);
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const ins = sqlite.prepare(
+    `INSERT INTO trades (ticker, action, shares, price, total, status, pnl, opened_at, closed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, '2026-01-01', ?)`,
+  );
+  for (let i = 0; i < 300; i++) {
+    const shares = Math.round(rnd() * 1000) / 100 + 0.01;
+    const price = Math.round(rnd() * 5000) / 100 + 1;
+    const status = rnd() < 0.7 ? "closed" : "open";
+    // Include the odd shapes the old loop tolerated: closed with no P&L, non-buy actions.
+    const pnl = status === "closed" && rnd() < 0.9 ? Math.round((rnd() - 0.5) * 2000) / 100 : null;
+    const action = rnd() < 0.95 ? "buy" : "sell";
+    ins.run(tickers[i % 4], action, shares, price, Math.round(shares * price * 100) / 100, status, pnl,
+      status === "closed" ? "2026-01-02" : null);
+  }
+
+  // The previous implementation, verbatim, over the full trade list.
+  const all = storage.getTrades();
+  let cash = STARTING_BALANCE;
+  for (const t of all) {
+    if (t.action === "buy") cash -= t.total;
+    if (t.status === "closed" && t.pnl !== null) cash += t.total + t.pnl;
+  }
+  const closed = all.filter(t => t.status === "closed");
+  const wins = closed.filter(t => t.pnl !== null && t.pnl > 0).length;
+  const expectedWinRate = closed.length > 0 ? Math.round((wins / closed.length) * 10000) / 100 : 0;
+
+  const p = storage.getPortfolio();
+  assert.equal(p.cash, Math.round(cash * 100) / 100);
+  assert.equal(p.winRate, expectedWinRate);
+  const openTickers = new Set(all.filter(t => t.status === "open").map(t => t.ticker));
+  assert.equal(p.openPositions, openTickers.size);
 });

@@ -39,7 +39,9 @@ every restart signs everyone out. Failed logins are throttled to 10 per
 15 minutes per client IP.
 
 With a live feed, new stock entries are only taken during the US regular
-session (9:30–16:00 ET, Mon–Fri; exchange holidays are not modelled), and a
+session (9:30–16:00 ET on NYSE trading days, closing at 13:00 on early-close
+days; exchange holidays are computed from the NYSE rules, one-off closures
+are not modelled), and a
 stock without a fresh quote holds its last price instead of being
 simulated. Crypto, forex and commodity instruments stay simulated.
 
