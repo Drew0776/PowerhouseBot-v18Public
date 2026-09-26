@@ -21,10 +21,16 @@ const DATA_BASE     = "https://data.alpaca.markets/v2";
 const PAPER_BASE    = "https://paper-api.alpaca.markets/v2";
 const WS_URL        = "wss://stream.data.alpaca.markets/v2/iex";
 
-// Track ALL instruments from the seed universe (181 total).
-// Alpaca will return live prices for US stocks/ETFs (~127); crypto/forex/commodity
-// symbols return null from getAlpacaPrice() and automatically fall back to simulation.
-export const ALPACA_STOCK_TICKERS: Set<string> = new Set(Object.keys(STOCK_INFO));
+// Only US stocks/ETFs from the seed universe. Crypto, forex, commodity and index
+// symbols must NOT be sent to the stock-quote endpoints: several collide with
+// real, unrelated US tickers (BTC and ETH are Grayscale ETFs, LINK is Interlink
+// Electronics, CORN is the Teucrium fund), whose quotes would silently replace
+// the instrument's price. Those instruments stay on the simulator.
+export const ALPACA_STOCK_TICKERS: Set<string> = new Set(
+  Object.entries(STOCK_INFO)
+    .filter(([, info]) => !info.marketType || info.marketType === "stock")
+    .map(([ticker]) => ticker),
+);
 
 // ── Price-update callback (registered externally to avoid circular imports) ───
 let _onPriceUpdate: ((ticker: string, price: number) => void) | null = null;
@@ -178,6 +184,7 @@ async function fetchChunk(tickers: string[]): Promise<number> {
     const now = Date.now();
     let cached = 0;
     for (const [ticker, q] of Object.entries(quotes)) {
+      if (!ALPACA_STOCK_TICKERS.has(ticker)) continue;
       const bid = q.bp ?? 0;
       const ask = q.ap ?? 0;
       const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
@@ -476,7 +483,7 @@ function handleWsItem(item: unknown): void {
   // Quote
   if (T === "q") {
     const q = item as WsQuoteMsg;
-    if (!q.S) return;
+    if (!q.S || !ALPACA_STOCK_TICKERS.has(q.S)) return;
     const bid = q.bp ?? 0;
     const ask = q.ap ?? 0;
     const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
@@ -493,7 +500,7 @@ function handleWsItem(item: unknown): void {
   // Trade — use as a price update with same bid/ask kept from prior quote
   if (T === "t") {
     const t = item as WsTradeMsg;
-    if (!t.S || !t.p || t.p <= 0) return;
+    if (!t.S || !ALPACA_STOCK_TICKERS.has(t.S) || !t.p || t.p <= 0) return;
     const prev = priceCache.get(t.S);
     const now = Date.now();
     priceCache.set(t.S, {

@@ -22,7 +22,7 @@ EXPOSE 5000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost:5000/api/auto-trader > /dev/null || exit 1
+  CMD wget -qO- http://localhost:5000/api/health > /dev/null || exit 1
 
 # Start
 ENV NODE_ENV=production
