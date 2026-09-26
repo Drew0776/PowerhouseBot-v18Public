@@ -65,7 +65,8 @@ try {
   sqlite.exec(`ALTER TABLE trades ADD COLUMN take_profit REAL`);
 } catch (_) { /* column already exists */ }
 
-const STARTING_BALANCE = 500; // V17: raised from $100 — realistic position sizing (was too tight)
+export const STARTING_BALANCE = 500;
+const EQUITY_CURVE_MAX_POINTS = 5000; // V17: raised from $100 — realistic position sizing (was too tight)
 
 // Cache stock data (generated once at startup)
 let stockDataCache = generateAllStocks();
@@ -215,7 +216,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   addEquityCurvePoint(point: InsertEquityCurve): EquityCurvePoint {
-    return db.insert(equityCurve).values(point).returning().get();
+    const row = db.insert(equityCurve).values(point).returning().get();
+    // Keep the curve bounded: it gets a point per trade event plus every 5
+    // minutes, forever, and /api/equity-curve returns all of it.
+    if (row.id % 500 === 0) {
+      sqlite.prepare("DELETE FROM equity_curve WHERE id <= ?").run(row.id - EQUITY_CURVE_MAX_POINTS);
+    }
+    return row;
   }
 
   getPortfolio(): PortfolioSummary {

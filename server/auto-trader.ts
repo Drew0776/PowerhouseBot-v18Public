@@ -25,15 +25,15 @@
  *   Fix: forex cap 12% → 15%, trend window +10t, gate loosened
  */
 
-import { storage, getStockData, getStockByTicker } from "./storage";
+import { storage, getStockData, getStockByTicker, STARTING_BALANCE } from "./storage";
 import {
   getAlpacaPrice,
   getAlpacaQuote,
   getAlpacaPriceAgeMs,
   ALPACA_STOCK_TICKERS,
   startAlpacaFeed,
-  stopAlpacaFeed,
   getAlpacaStatus,
+  isAlpacaConfigured,
 } from "./alpaca";
 import type { StockData } from "@shared/schema";
 
@@ -117,6 +117,8 @@ export interface ActivePosition {
   enteredAt: string;
   tier1Hit: boolean;
   status: "running" | "stopped_out" | "target_hit" | "momentum_exit" | "circuit_breaker";
+  /** P&L already realized by the T1 partial exit; counted into the trade's result at final close. */
+  t1Pnl?: number;
   atr: number;
   ticksOpen: number;
   marketType: string;
@@ -195,16 +197,36 @@ const KELLY_CAP      = 0.08;  // 8% max account risk per trade
 const POS_MIN_PCT = 0.35;  // V10: 35% min (was 30%) — bigger wins
 const POS_MAX_PCT = 0.50;  // V10: 50% max (was 40%)
 
-// Event blackout (4 key events, short windows)
-const EVENTS = [
-  { name: "FOMC",     s: 200, e: 207 },
-  { name: "CPI",      s: 500, e: 507 },
-  { name: "Earnings", s: 700, e: 707 },
-  { name: "NFP",      s: 900, e: 907 },
-];
+// ─── Market hours ────────────────────────────────────────────────────────────
+// The old "event blackout" fired at fixed tick counts (FOMC at tick 200 …),
+// not on real dates, so it only ever ran in the first ~30 minutes after a
+// reset. It's replaced by a real session gate: with a live Alpaca feed, new
+// stock entries are only taken during the US regular session (9:30–16:00 ET,
+// Mon–Fri; exchange holidays are not modelled). eventFilterActive /
+// currentEvent now report that gate so the dashboard badge stays meaningful.
 
-function activeEvent(tick: number) {
-  return EVENTS.find(e => tick >= e.s && tick <= e.e) ?? null;
+function etNow(): Date {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+export function isUsMarketOpen(now: Date = etNow()): boolean {
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
+
+/** Live mode: stock prices come from Alpaca, never from the simulator. */
+function isLiveStock(ticker: string): boolean {
+  return isAlpacaConfigured() && ALPACA_STOCK_TICKERS.has(ticker);
+}
+
+/** Why a new entry in this ticker is blocked right now, or null if allowed. */
+function entryBlockReason(ticker: string): string | null {
+  if (!isLiveStock(ticker)) return null;
+  if (!isUsMarketOpen()) return "market_closed";
+  if (!getAlpacaQuote(ticker)) return "no_live_quote";
+  return null;
 }
 
 // ─── Slippage ─────────────────────────────────────────────────────────────────
@@ -261,9 +283,15 @@ function advancePrice(ticker: string, mt: string): number {
       return realPrice;
     }
   }
-  // Fall through to simulation for crypto/forex/commodity or if Alpaca unavailable
+  // Live stock without a fresh quote (feed hiccup, after hours): hold the last
+  // known price. Simulating it would mark — and exit — real positions at
+  // synthetic prices.
   const stock = getStockByTicker(ticker);
   if (!stock) return 0;
+  if (isLiveStock(ticker)) return _prices.get(ticker)?.price ?? stock.price;
+
+  // Simulation for crypto/forex/commodity, or for everything when no Alpaca
+  // keys are configured.
 
   if (!_seeds.has(ticker)) _seeds.set(ticker, stock.price);
   const seed = _seeds.get(ticker)!;
@@ -422,17 +450,8 @@ function computeCompositeScore(s: StockData, mt: string): number | null {
   if (s.shortInterestPct >= 20 && s.floatShares < 50) composite *= 1.20;
   // High catalyst + strong volume → +15% (news catalyst is extra edge)
   if (s.catalystScore >= 80 && s.volumeSpikeRatio >= 1.5) composite *= 1.15;
-  // Audit Page 9 #3: Apply boost ONLY to top-3 fastest instruments
-  // V16 FIX #3: SOFI removed from MID_INSTRUMENTS — caused 36% portfolio concentration
-  // Only AVAX stays in MID tier; AUDUSD/COFFEE/SOFI get no boost
-  const TOP3_INSTRUMENTS = new Set(["ACHR", "IREN", "LINK"]);   // audit fastest: 4t, 6t, 9t
-  const MID_INSTRUMENTS  = new Set(["AVAX"]);                    // V16: SOFI removed (was 36% oversize)
-  // AUDUSD, COFFEE, SOFI: no boost → score stays at 80-88, grade B/C, smaller positions
-  if (TOP3_INSTRUMENTS.has(s.ticker)) {
-    composite *= 1.55;  // Strong boost for proven fastest instruments
-  } else if (MID_INSTRUMENTS.has(s.ticker)) {
-    composite *= 1.20;  // Moderate boost for medium performers
-  }
+  // (Fixed per-ticker boosts for ACHR/IREN/LINK/AVAX were removed: they were
+  // tuned to earlier simulator runs, not to any property of the instrument.)
 
   // Cap at 100
   composite = Math.min(100, composite);
@@ -482,14 +501,20 @@ function sizePosition(
 
 // ─── Scanner — FINDING 3+5 FIX: Rank-Based ───────────────────────────────────
 
-export function scanForBreakouts(): BreakoutSignal[] {
+/**
+ * Rank the universe and build entry signals. The live tick passes
+ * `advance: true` to step prices and MTF history first; the preview endpoint
+ * passes false so a GET never moves prices or rewrites engine state.
+ */
+export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSignal[] {
+  const advance = opts.advance ?? true;
   const all = getStockData();
   const regime = detectRegime();
 
   // Step 1: Advance prices for instruments NOT in open positions
   // (Open positions are already advanced in managePositions — avoid double-advancing)
   const openTickers = new Set(state.openPositions.map(p => p.ticker));
-  for (const s of all) {
+  for (const s of advance ? all : []) {
     const mt = (s as any).marketType ?? "stock";
     if (openTickers.has(s.ticker)) {
       // Already advanced in managePositions — just update MTF with current price
@@ -565,6 +590,10 @@ export function scanForBreakouts(): BreakoutSignal[] {
     if (portfolio.cash < 1) continue;
     let { posSize, kf } = sizePosition(r.compositeScore, portfolio);
 
+    // Risk cap: a stop-out may lose at most kf (≤ KELLY_CAP) of the portfolio.
+    const stopPct = (price - stop) / price;
+    if (stopPct > 0) posSize = Math.min(posSize, (portfolio.totalValue * kf) / stopPct);
+
     // V14 AUDIT FIX: Grade-based sizing — IREN (A, 100% FT) > AUDUSD (B, 15% FT)
     // A+=100%  A=85%  B=60%  C=40%
     const gFactor = grade === "A+" ? 1.0 : grade === "A" ? 0.85 : grade === "B" ? 0.60 : 0.40;
@@ -600,15 +629,17 @@ export function scanForBreakouts(): BreakoutSignal[] {
     });
   }
 
-  state.lastScan = signals.slice(0, 12);
-  state.regime   = regime;
+  if (advance) {
+    state.lastScan = signals.slice(0, 12);
+    state.regime   = regime;
+  }
   return signals;
 }
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
-let sessionStartValue = 100;
-let sessionPeak = 100;
+let sessionStartValue = STARTING_BALANCE;
+let sessionPeak = STARTING_BALANCE;
 let t1HitCount = 0;
 let maxHoldCount = 0;
 
@@ -618,7 +649,7 @@ let state: AutoTraderState = {
   totalPnl: 0, dailyPnl: 0, circuitBreakerActive: false,
   regime: "unknown", bestTrade: null, lastScan: [], log: [],
   eventFilterActive: false, currentEvent: null, totalSlippageCost: 0,
-  roiPct: 0, pnlPerTick: 0, tradesPerHundredTicks: 0, sessionPeak: 100,
+  roiPct: 0, pnlPerTick: 0, tradesPerHundredTicks: 0, sessionPeak: STARTING_BALANCE,
   t1HitRate: 0, maxHoldRate: 0, capitalUtilization: 0,
   stats: { avgWin: 0, avgLoss: 0, profitFactor: 0, expectancy: 0, sharpeApprox: 0, totalWinAmount: 0, totalLossAmount: 0 },
 };
@@ -627,7 +658,7 @@ let wins = 0, losses = 0, totalWinAmt = 0, totalLossAmt = 0;
 let _tickInterval: ReturnType<typeof setInterval> | null = null;
 let _equitySnapshotInterval: ReturnType<typeof setInterval> | null = null;
 const cooldowns = new Map<string, number>();
-const dailyStart = { value: 100, tick: 0, dateKey: '' }; // V17: dateKey tracks calendar day for daily P&L reset
+const dailyStart = { value: STARTING_BALANCE, tick: 0, dateKey: '' }; // V17: dateKey tracks calendar day for daily P&L reset
 const pnlHistory: number[] = [];
 
 function log(msg: string) {
@@ -678,11 +709,7 @@ function updateStats() {
 
 function enterTrade(sig: BreakoutSignal): ActivePosition | null {
   if (state.circuitBreakerActive) return null;
-
-  const evt = activeEvent(state.totalTicks);
-  state.eventFilterActive = !!evt;
-  state.currentEvent = evt?.name ?? null;
-  if (evt) return null;
+  if (entryBlockReason(sig.ticker)) return null;
 
   const portfolio = storage.getPortfolio();
   if (portfolio.cash < sig.positionSize) return null;
@@ -704,8 +731,10 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
         state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
         state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
         state.dailyPnl = Math.round((state.dailyPnl + closePnl) * 100) / 100;
-        if (closePnl >= 0) { wins++; totalWinAmt += closePnl; }
-        else { losses++; totalLossAmt += Math.abs(closePnl); }
+        const tradePnl = closePnl + (worst.t1Pnl ?? 0);
+        if (tradePnl >= 0) { wins++; totalWinAmt += tradePnl; }
+        else { losses++; totalLossAmt += Math.abs(tradePnl); }
+        pnlHistory.push(tradePnl);
         state.closedTrades++;
         state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
         updateStats();
@@ -782,22 +811,28 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   // Re-check eligibility — circuit breaker / event blackout may have flipped
   // since submission, and an open position for this ticker may have appeared.
   if (state.circuitBreakerActive) { cancelPending(pending, "circuit_breaker"); return null; }
-  if (activeEvent(state.totalTicks)) { cancelPending(pending, "event_blackout"); return null; }
+  const blocked = entryBlockReason(sig.ticker);
+  if (blocked) { cancelPending(pending, blocked); return null; }
   if (state.openPositions.some(p => p.ticker === sig.ticker)) { cancelPending(pending, "duplicate"); return null; }
   if (state.openPositions.length >= MAX_POSITIONS) { cancelPending(pending, "no_slot"); return null; }
 
   const stock = getStockByTicker(sig.ticker);
   if (!stock) { cancelPending(pending, "no_stock"); return null; }
-  const curPrice = stock.price;
+  // A buy fills at the ask when we have a live quote (mid otherwise).
+  const q = ALPACA_STOCK_TICKERS.has(sig.ticker) ? getAlpacaQuote(sig.ticker) : null;
+  const curPrice = q && q.ask > 0 ? q.ask : stock.price;
 
   // Buy limit fills only when market trades at or below the limit.
   if (!(curPrice > 0) || curPrice > pending.limitPrice) return null;
 
-  // Final cash check (price-adjusted to actual fill).
-  const fillPrice = curPrice; // limit fills at the better of (limit, current)
+  // Entry slippage is folded into the entry price, the same way the backtest
+  // does it, so live and backtest results are comparable.
+  const entrySlip = slippage(sig.shares, curPrice, mt);
+  const fillPrice = Math.round((curPrice + entrySlip / sig.shares) * 10000) / 10000;
   const portfolio = storage.getPortfolio();
   const total = fillPrice * sig.shares;
   if (total > portfolio.cash) { cancelPending(pending, "insufficient_cash"); return null; }
+  state.totalSlippageCost = Math.round((state.totalSlippageCost + entrySlip) * 10000) / 10000;
 
   const trade = storage.createTrade({
     ticker: sig.ticker, action: "buy", shares: sig.shares,
@@ -916,7 +951,7 @@ function managePositions() {
       state.totalPnl = Math.round((state.totalPnl + t1pnl) * 100) / 100;
       state.dailyPnl = Math.round((state.dailyPnl + t1pnl) * 100) / 100;
       state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
-      totalWinAmt += t1pnl;
+      pos.t1Pnl = t1pnl;
       t1HitCount++;
       log(`T1 HIT ✓ | ${pos.ticker} | +$${t1pnl.toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${pos.takeProfit2.toFixed(4)}`);
     }
@@ -1007,13 +1042,15 @@ function managePositions() {
       state.totalPnl = Math.round((state.totalPnl + closePnl) * 100) / 100;
       state.dailyPnl = Math.round((state.dailyPnl + closePnl) * 100) / 100;
 
-      if (closePnl >= 0) {
-        wins++; totalWinAmt += closePnl;
-        if (!state.bestTrade || closePnl > state.bestTrade.pnl) {
-          state.bestTrade = { ticker: pos.ticker, pnl: closePnl, pct: pos.pnlPct };
+      // Win/loss stats use the whole trade: final exit plus any T1 partial.
+      const tradePnl = Math.round((closePnl + (pos.t1Pnl ?? 0)) * 100) / 100;
+      if (tradePnl >= 0) {
+        wins++; totalWinAmt += tradePnl;
+        if (!state.bestTrade || tradePnl > state.bestTrade.pnl) {
+          state.bestTrade = { ticker: pos.ticker, pnl: tradePnl, pct: pos.pnlPct };
         }
       } else {
-        losses++; totalLossAmt += Math.abs(closePnl);
+        losses++; totalLossAmt += Math.abs(tradePnl);
       }
 
       cooldowns.set(pos.ticker, state.totalTicks);
@@ -1021,7 +1058,7 @@ function managePositions() {
       state.closedTrades++;
       state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
       updateStats();
-      pnlHistory.push(closePnl);
+      pnlHistory.push(tradePnl);
 
       const icon = closePnl >= 0 ? "✓" : "✗";
       log(`EXIT ${icon} ${exitReason.toUpperCase()} | ${pos.ticker} | ${pos.pnlPct >= 0 ? "+" : ""}${pos.pnlPct}% | Net ${closePnl >= 0 ? "+" : ""}$${closePnl.toFixed(2)} | ${pos.ticksOpen} ticks`);
@@ -1052,10 +1089,40 @@ function checkCircuitBreaker() {
   } else if (dd >= limit && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`⚠️ CIRCUIT BREAKER | Drawdown ${(dd*100).toFixed(1)}% ≥ ${(limit*100).toFixed(0)}% limit | Paused`);
-  } else if (state.circuitBreakerActive && p.totalValue > 50 && dd < limit) {
-    state.circuitBreakerActive = false;
-    log(`✅ CIRCUIT BREAKER RESET | Portfolio recovered — drawdown ${(dd*100).toFixed(1)}% < ${(limit*100).toFixed(0)}% limit | Trading resumed`);
   }
+  // Once tripped the breaker stays latched: it clears only on a manual reset
+  // (resetCircuitBreaker) or when a new ET trading day re-baselines dailyStart
+  // (rollDailyAnchor). Auto-clearing on "recovery" let a bouncing mark switch
+  // the daily-loss limit off and on again within the same day.
+}
+
+/**
+ * Initialize dailyStart on first use and roll it at ET midnight. A new day
+ * also releases a latched breaker, since the daily-loss limit starts over.
+ */
+function rollDailyAnchor(markTick: number): void {
+  const todayKey = etDateKey();
+  const prevDateKey = dailyStart.dateKey;
+  const isNewDay = !!prevDateKey && prevDateKey !== todayKey;
+  if (dailyStart.tick === 0 || isNewDay) {
+    const p = storage.getPortfolio();
+    dailyStart.value = p.totalValue;
+    dailyStart.tick  = markTick;
+    dailyStart.dateKey = todayKey;
+    if (isNewDay) {
+      state.dailyPnl = 0; // Reset for new trading day
+      if (state.circuitBreakerActive) {
+        state.circuitBreakerActive = false;
+        log(`✅ CIRCUIT BREAKER RELEASED | New trading day`);
+      }
+      log(`🌅 NEW TRADING DAY — Daily P&L reset. Starting value: $${p.totalValue.toFixed(2)}`);
+    }
+  }
+}
+
+function etDateKey(): string {
+  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
 }
 
 // ─── Main Tick ────────────────────────────────────────────────────────────────
@@ -1064,28 +1131,15 @@ export function autoTraderTick(): { signals: BreakoutSignal[]; entered: ActivePo
   state.totalTicks++;
 
   // V17 BUG FIX #2: Daily reset — check for new trading day (ET midnight-aware)
-  // dailyPnl was accumulating forever; circuit breaker math was meaningless long-session
-  const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const todayKey = `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
-  const prevDateKey = dailyStart.dateKey;
-  const isNewDay = !!prevDateKey && prevDateKey !== todayKey;
-  if (dailyStart.tick === 0 || isNewDay) {
-    const p = storage.getPortfolio();
-    dailyStart.value = p.totalValue;
-    dailyStart.tick  = state.totalTicks;
-    dailyStart.dateKey = todayKey;
-    if (isNewDay) {
-      state.dailyPnl = 0; // Reset for new trading day
-      log(`🌅 NEW TRADING DAY — Daily P&L reset. Starting value: $${p.totalValue.toFixed(2)}`);
-    }
-  }
+  rollDailyAnchor(state.totalTicks);
 
-  const prevEvt = activeEvent(state.totalTicks - 1);
-  const evt = activeEvent(state.totalTicks);
-  state.eventFilterActive = !!evt;
-  state.currentEvent = evt?.name ?? null;
-  if (evt && !prevEvt) log(`📅 BLACKOUT: ${evt.name} (ticks ${evt.s}–${evt.e})`);
-  else if (!evt && prevEvt) log(`✅ TRADING RESUMED after ${prevEvt.name}`);
+  // Market-hours gate status for the dashboard (only meaningful with a live feed).
+  const wasClosed = state.eventFilterActive;
+  const closed = isAlpacaConfigured() && !isUsMarketOpen();
+  state.eventFilterActive = closed;
+  state.currentEvent = closed ? "US market closed" : null;
+  if (closed && !wasClosed) log(`📅 US MARKET CLOSED — no new stock entries until 9:30 ET`);
+  else if (!closed && wasClosed) log(`✅ US MARKET OPEN — stock entries resumed`);
 
   checkCircuitBreaker();
 
@@ -1116,7 +1170,7 @@ export function autoTraderTick(): { signals: BreakoutSignal[]; entered: ActivePo
   const signals = scanForBreakouts();
 
   // V9: Enter up to 2 per tick when slots available (fast capital deployment)
-  if (!state.circuitBreakerActive && !state.eventFilterActive) {
+  if (!state.circuitBreakerActive) {
     const portfolio = storage.getPortfolio();
     const maxEnter = portfolio.totalValue >= 150 ? 2 : 1;
     // Count both filled positions AND working pending limits against the cap.
@@ -1199,7 +1253,8 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
   }
 
   const positions: SimPos[] = [];
-  let bal = 100, peak = 100, maxDD_IS = 0, maxDD_OOS = 0;
+  let bal = STARTING_BALANCE, peak = STARTING_BALANCE, maxDD_IS = 0, maxDD_OOS = 0;
+  let balAtSplit = STARTING_BALANCE;
   let isW = 0, isL = 0, isWA = 0, isLA = 0, isT = 0, isSl = 0;
   let oosW = 0, oosL = 0, oosWA = 0, oosLA = 0, oosT = 0, oosSl = 0;
 
@@ -1214,7 +1269,6 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
       lMTF.set(s.ticker, mh);
     }
 
-    if (activeEvent(tick)) continue;
 
     // Manage positions
     for (let pi = positions.length - 1; pi >= 0; pi--) {
@@ -1260,6 +1314,7 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
     const dd = (peak - bal) / Math.max(peak, 1);
     if (inIS && dd > maxDD_IS) maxDD_IS = dd;
     if (!inIS && dd > maxDD_OOS) maxDD_OOS = dd;
+    if (tick === splitAt) balAtSplit = bal;
 
     if (positions.length >= MAX_POSITIONS) continue;
 
@@ -1316,13 +1371,13 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
     }
   }
 
-  function mk(tks: number, trades: number, w: number, l: number, wa: number, la: number, sl: number, startB: number, maxDD: number) {
+  function mk(tks: number, trades: number, w: number, l: number, wa: number, la: number, sl: number, startB: number, endB: number, maxDD: number) {
     const pf = la > 0 ? Math.round((wa / la) * 100) / 100 : wa > 0 ? 99 : 0;
     const wr = trades > 0 ? Math.round((w / trades) * 10000) / 100 : 0;
     return {
       ticks: tks, trades, wins: w, losses: l, winRate: wr, profitFactor: pf,
-      totalReturn: Math.round(((bal - startB) / Math.max(startB, 1)) * 10000) / 100,
-      finalBalance: Math.round(bal * 100) / 100,
+      totalReturn: Math.round(((endB - startB) / Math.max(startB, 1)) * 10000) / 100,
+      finalBalance: Math.round(endB * 100) / 100,
       maxDrawdown: Math.round(maxDD * 10000) / 100,
       avgWin:  w > 0 ? Math.round((wa / w)  * 100) / 100 : 0,
       avgLoss: l > 0 ? Math.round((la / l) * 100) / 100 : 0,
@@ -1330,8 +1385,8 @@ export function runWalkForwardBacktest(totalTicks = 1000): BacktestResult {
     };
   }
 
-  const isR  = mk(splitAt, isT,  isW,  isL,  isWA,  isLA,  isSl,  100, maxDD_IS);
-  const oosR = mk(totalTicks - splitAt, oosT, oosW, oosL, oosWA, oosLA, oosSl, isR.finalBalance, maxDD_OOS);
+  const isR  = mk(splitAt, isT,  isW,  isL,  isWA,  isLA,  isSl,  STARTING_BALANCE, balAtSplit, maxDD_IS);
+  const oosR = mk(totalTicks - splitAt, oosT, oosW, oosL, oosWA, oosLA, oosSl, balAtSplit, bal, maxDD_OOS);
 
   const hasStat = oosT >= 3;
   const degrad = hasStat && isR.profitFactor > 0 && isR.profitFactor < 99 && oosR.profitFactor < 99
@@ -1371,7 +1426,8 @@ export function startAutoTrader() {
 
   state.isRunning = true;
   state.dailyPnl = 0;
-  state.circuitBreakerActive = false;
+  // circuitBreakerActive is restored as persisted: stop/start (or a server
+  // restart) must not bypass a tripped daily-loss breaker.
 
   // Reset all simulation state on start — prevents stale MTF blocking entries
   _prices.clear();
@@ -1410,6 +1466,7 @@ export function startAutoTrader() {
     dailyStart.value = p.totalValue;
     dailyStart.tick  = state.totalTicks;
     dailyStart.dateKey = todayKey;
+    state.circuitBreakerActive = false; // new day (or first start): daily limit starts over
     log(`🌅 Daily anchor initialized: $${p.totalValue.toFixed(2)}`);
   }
   sessionStartValue = p.totalValue;
@@ -1467,6 +1524,7 @@ function persistState() {
       dailyStartValue: dailyStart.value,
       dailyStartTick: dailyStart.tick,
       dailyStartDateKey: dailyStart.dateKey,
+      circuitBreakerActive: state.circuitBreakerActive,
       openPositions: state.openPositions,
     };
     const json = JSON.stringify(payload, safeReplacer);
@@ -1493,7 +1551,9 @@ function restoreState() {
     state.roiPct = s.roiPct ?? 0;
     wins = s.wins ?? 0; losses = s.losses ?? 0;
     totalWinAmt = s.totalWinAmt ?? 0; totalLossAmt = s.totalLossAmt ?? 0;
+    pnlHistory.length = 0; // replace, don't append — restoreState runs on every start
     if (s.pnlHistory) pnlHistory.push(...s.pnlHistory);
+    state.circuitBreakerActive = s.circuitBreakerActive === true;
     if (s.dailyStartValue) dailyStart.value = s.dailyStartValue;
     if (s.dailyStartTick) dailyStart.tick = s.dailyStartTick;
     if (s.dailyStartDateKey) dailyStart.dateKey = s.dailyStartDateKey;
@@ -1519,7 +1579,7 @@ export function stopAutoTrader() {
   if (_equitySnapshotInterval) { clearInterval(_equitySnapshotInterval); _equitySnapshotInterval = null; }
   state.isRunning = false;
   persistState(); // save including isRunning: false
-  stopAlpacaFeed(); // V18: stop polling
+  // The Alpaca feed keeps running: grid bots and the dashboard use it too.
   log("⏹ V19 STOPPED");
 }
 
@@ -1638,7 +1698,10 @@ export function resetCircuitBreaker(opts?: { manual?: boolean }) {
   state.circuitBreakerActive = false;
   const p = storage.getPortfolio();
   dailyStart.value = p.totalValue;
-  dailyStart.tick  = state.totalTicks;
+  // A manual reset must leave the anchor marked initialized (tick ≥ 1) even if
+  // the auto-trader has never ticked (grid-only use); otherwise the next
+  // evaluation re-baselines it again at whatever the portfolio is then.
+  dailyStart.tick  = opts?.manual ? Math.max(1, state.totalTicks) : state.totalTicks;
   // Task #68: re-anchor the ET dateKey so the very next evaluateCircuitBreaker()
   // call doesn't fall into the "uninitialised" branch and re-baseline yet again.
   const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -1667,16 +1730,7 @@ export function isCircuitBreakerActive(): boolean {
  */
 export function evaluateCircuitBreaker(): boolean {
   try {
-    const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-    const todayKey = `${nowET.getFullYear()}-${nowET.getMonth()}-${nowET.getDate()}`;
-    const prevDateKey = dailyStart.dateKey;
-    const isNewDay = !!prevDateKey && prevDateKey !== todayKey;
-    if (dailyStart.tick === 0 || isNewDay) {
-      const p = storage.getPortfolio();
-      dailyStart.value = p.totalValue;
-      dailyStart.tick = Math.max(1, state.totalTicks); // mark initialized
-      dailyStart.dateKey = todayKey;
-    }
+    rollDailyAnchor(Math.max(1, state.totalTicks)); // tick ≥ 1 marks it initialized
     checkCircuitBreaker();
   } catch (_e) { /* non-fatal */ }
   return state.circuitBreakerActive;
@@ -1690,11 +1744,8 @@ export function resetAutoTraderState() {
   // Clear background tick loop first
   if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
   if (_equitySnapshotInterval) { clearInterval(_equitySnapshotInterval); _equitySnapshotInterval = null; }
-  // Stop the engine if running
-  if (state.isRunning) {
-    state.isRunning = false;
-    stopAlpacaFeed();
-  }
+  // Stop the engine if running (the shared Alpaca feed stays up)
+  state.isRunning = false;
 
   // Zero all counters and clear positions/history
   state.totalTicks          = 0;
@@ -1715,7 +1766,7 @@ export function resetAutoTraderState() {
   state.roiPct              = 0;
   state.pnlPerTick          = 0;
   state.tradesPerHundredTicks = 0;
-  state.sessionPeak         = 100;
+  state.sessionPeak         = STARTING_BALANCE;
   state.t1HitRate           = 0;
   state.maxHoldRate         = 0;
   state.capitalUtilization  = 0;
@@ -1724,8 +1775,8 @@ export function resetAutoTraderState() {
   // Reset local accumulators
   wins = 0; losses = 0; totalWinAmt = 0; totalLossAmt = 0;
   t1HitCount = 0; maxHoldCount = 0;
-  sessionStartValue = 100;
-  sessionPeak = 100;
+  sessionStartValue = STARTING_BALANCE;
+  sessionPeak = STARTING_BALANCE;
   pnlHistory.length = 0;
 
   // Clear simulation maps
@@ -1734,7 +1785,7 @@ export function resetAutoTraderState() {
   pendingEntries.length = 0; // Task #49: drop pending limits on full reset
 
   // Reset daily tracking
-  dailyStart.value = 100;
+  dailyStart.value = STARTING_BALANCE;
   dailyStart.tick  = 0;
   dailyStart.dateKey = '';
 

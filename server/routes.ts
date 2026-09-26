@@ -1,6 +1,6 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
-import { storage, sqlite, getStockData, getStockByTicker, getGridPrice } from "./storage";
+import { storage, sqlite, getStockData, getStockByTicker, getGridPrice, STARTING_BALANCE } from "./storage";
 import { requireAuth, passport } from "./auth";
 import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow, generateMarketStatus } from "./seed";
 import {
@@ -88,10 +88,29 @@ export async function registerRoutes(
   });
 
   // POST /api/auth/login — { password }
+  // Throttled per client IP: 10 failed attempts per 15 minutes.
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  const LOGIN_MAX_FAILURES = 10;
+  const loginFailures = new Map<string, { count: number; resetAt: number }>();
   app.post("/api/auth/login", (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip ?? "unknown";
+    const now = Date.now();
+    const entry = loginFailures.get(ip);
+    if (entry && entry.resetAt <= now) loginFailures.delete(ip);
+    const current = loginFailures.get(ip);
+    if (current && current.count >= LOGIN_MAX_FAILURES) {
+      res.setHeader("Retry-After", String(Math.ceil((current.resetAt - now) / 1000)));
+      return res.status(429).json({ message: "Too many failed attempts. Try again later." });
+    }
     passport.authenticate("local", (err: unknown, user: Express.User | false) => {
       if (err) return next(err);
-      if (!user) return res.status(401).json({ message: "Invalid password" });
+      if (!user) {
+        const f = loginFailures.get(ip) ?? { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+        f.count++;
+        loginFailures.set(ip, f);
+        return res.status(401).json({ message: "Invalid password" });
+      }
+      loginFailures.delete(ip);
       req.logIn(user, (loginErr) => {
         if (loginErr) return next(loginErr);
         res.json({ authenticated: true });
@@ -330,10 +349,30 @@ export async function registerRoutes(
     res.json({ connected: true, message: "Test alert sent to your Telegram!" });
   });
 
-  // POST /api/settings
+  // POST /api/settings — only known keys, with the right types and ranges.
+  const pct = z.number().finite().min(0).max(100);
+  const settingsSchema = z.object({
+    maxPositionPct: pct,
+    stopLossPct: pct,
+    takeProfitPct: z.number().finite().min(0).max(1000),
+    scannerPennyActive: z.boolean(),
+    scannerMomentumActive: z.boolean(),
+    scannerSqueezeActive: z.boolean(),
+    scannerOptionsActive: z.boolean(),
+    minScoreThreshold: pct,
+    alertsEnabled: z.boolean(),
+    alertBuySignals: z.boolean(),
+    alertSellSignals: z.boolean(),
+    alertPriceAlerts: z.boolean(),
+  }).partial().strict();
+
   app.post("/api/settings", requireAuth, (req, res) => {
     try {
-      const s = storage.saveSettings(req.body);
+      const parsed = settingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid settings", errors: parsed.error.errors });
+      }
+      const s = storage.saveSettings(parsed.data);
       res.json(s);
     } catch (err) {
       res.status(500).json({ message: "Failed to save settings" });
@@ -547,7 +586,7 @@ export async function registerRoutes(
   // GET /api/auto-trader/scan — scan without trading (preview)
   app.get("/api/auto-trader/scan", requireAuth, (_req, res) => {
     try {
-      const signals = scanForBreakouts();
+      const signals = scanForBreakouts({ advance: false }); // preview: no price moves
       res.json(signals);
     } catch (err) {
       res.status(500).json({ message: "Failed to scan" });
@@ -568,7 +607,10 @@ export async function registerRoutes(
   // POST /api/auto-trader/backtest — V6 walk-forward backtest
   app.post("/api/auto-trader/backtest", requireAuth, (req, res) => {
     try {
-      const ticks = typeof req.body?.ticks === "number" ? Math.min(req.body.ticks, 5000) : 1000;
+      const raw = req.body?.ticks;
+      const ticks = typeof raw === "number" && Number.isFinite(raw)
+        ? Math.max(10, Math.min(5000, Math.floor(raw)))
+        : 1000;
       const result = runWalkForwardBacktest(ticks);
       res.json(result);
     } catch (err) {
@@ -587,10 +629,10 @@ export async function registerRoutes(
       db.delete(trades).run();
       db.delete(equityCurve).run();
       // Seed fresh equity point
-      storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: 100 });
+      storage.addEquityCurvePoint({ timestamp: new Date().toISOString(), value: STARTING_BALANCE });
       stopAutoTrader();
       resetAutoTraderState();
-      res.json({ message: "Portfolio reset to $100. All trades cleared.", cash: 100 });
+      res.json({ message: `Portfolio reset to $${STARTING_BALANCE}. All trades cleared.`, cash: STARTING_BALANCE });
     } catch (err) {
       console.error("[/api/portfolio/reset] error:", err);
       res.status(500).json({ message: "Reset failed" });
