@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect, memo, useCallback } from "react";
+import { formatPrice } from "@shared/price";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import type { Trade } from "@shared/schema";
@@ -297,8 +298,8 @@ export default function TradeLog() {
       return [
         t.ticker,
         "N/A",
-        entryPrice.toFixed(2),
-        exitPrice !== null ? exitPrice.toFixed(2) : "",
+        formatPrice(entryPrice),
+        exitPrice !== null ? formatPrice(exitPrice) : "",
         (t.shares ?? 0).toFixed(4),
         t.pnl !== null ? t.pnl.toFixed(2) : "",
         pnlPct !== null ? pnlPct.toFixed(2) + "%" : "",

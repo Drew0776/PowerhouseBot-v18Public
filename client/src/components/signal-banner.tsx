@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatPrice } from "@shared/price";
 import type { SignalRow } from "@shared/schema";
 import { Link } from "wouter";
 import { Zap } from "lucide-react";
@@ -30,7 +31,7 @@ export default function SignalBanner() {
                 </span>
               </div>
               <div className="text-right">
-                <div className="text-xs font-mono tabular-nums text-foreground">${s.price.toFixed(2)}</div>
+                <div className="text-xs font-mono tabular-nums text-foreground">${formatPrice(s.price)}</div>
                 <div className={`text-[10px] font-mono tabular-nums ${s.dayChangePercent >= 0 ? "text-[#00e676]" : "text-[#ff1744]"}`}>
                   {s.dayChangePercent >= 0 ? "+" : ""}{s.dayChangePercent}%
                 </div>

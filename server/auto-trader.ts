@@ -38,7 +38,7 @@ import {
 import type { StockData } from "@shared/schema";
 import { isRegularSessionOpen } from "./market-calendar";
 import { rsi as rsiOf, ema, macd, bollingerPctB, realizedVol, momentumZ } from "./indicators";
-import { roundPrice } from "@shared/price";
+import { roundPrice, formatPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
 import { estimateEdge, meanCI95 } from "./stats";
 
@@ -428,6 +428,9 @@ function estimateATR(ticker: string, mt: string, price: number): number {
   const spread = q && q.ask > q.bid && q.bid > 0 ? q.ask - q.bid : 0;
   return atrFrom(price, f?.sigma ?? null, getVol(ticker, mt), spread);
 }
+
+/** Log formatting for prices: 4 decimals at $1+, 4 significant digits below. */
+const px = (v: number) => formatPrice(v, 4);
 
 /** Stop never at or below zero: at least 1% of the entry price. */
 const stopFloor = (price: number) => price * 0.01;
@@ -827,7 +830,7 @@ function enterTrade(sig: BreakoutSignal): ActivePosition | null {
     status: "working",
   };
   pendingEntries.push(pending);
-  log(`📋 LIMIT BUY | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${limitPrice.toFixed(4)} (mid $${sig.entryPrice.toFixed(4)}) | working ≤${ENTRY_FILL_WINDOW}t`);
+  log(`📋 LIMIT BUY | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${px(limitPrice)} (mid $${px(sig.entryPrice)}) | working ≤${ENTRY_FILL_WINDOW}t`);
 
   // Try an immediate marketable-limit fill (current price already at-or-below limit).
   const filled = fillPendingEntry(pending);
@@ -903,13 +906,13 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   state.totalTrades++;
   pending.status = "filled";
 
-  log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${curPrice.toFixed(4)} (limit $${pending.limitPrice.toFixed(4)}; $${fillPrice.toFixed(4)} incl. costs) | Stop $${stopLoss.toFixed(4)} | T1 $${takeProfit1.toFixed(4)} | Score ${sig.score}`);
+  log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${px(curPrice)} (limit $${px(pending.limitPrice)}; $${px(fillPrice)} incl. costs) | Stop $${px(stopLoss)} | T1 $${px(takeProfit1)} | Score ${sig.score}`);
   return pos;
 }
 
 function cancelPending(pending: PendingEntry, reason: string): void {
   pending.status = "cancelled";
-  log(`🚫 LIMIT CANCEL | ${pending.sig.ticker} | $${pending.limitPrice.toFixed(4)} | ${reason}`);
+  log(`🚫 LIMIT CANCEL | ${pending.sig.ticker} | $${px(pending.limitPrice)} | ${reason}`);
 }
 
 /**
@@ -934,7 +937,7 @@ function tickPendingEntries(): ActivePosition[] {
     if (pe.attempts < ENTRY_MAX_ATTEMPTS && age >= ENTRY_FILL_WINDOW) {
       // Reprice once — more aggressive limit.
       const newLimit = computeEntryLimitPrice(pe.sig, ENTRY_REPRICE_TOL);
-      log(`🔁 LIMIT REPRICE | ${pe.sig.ticker} | $${pe.limitPrice.toFixed(4)} → $${newLimit.toFixed(4)}`);
+      log(`🔁 LIMIT REPRICE | ${pe.sig.ticker} | $${px(pe.limitPrice)} → $${px(newLimit)}`);
       pe.limitPrice = newLimit;
       pe.attempts++;
       pe.submittedAtTick = state.totalTicks;
@@ -997,7 +1000,7 @@ function managePositions() {
       state.totalSlippageCost = Math.round((state.totalSlippageCost + exitSlip) * 10000) / 10000;
       pos.t1Pnl = t1pnl;
       t1HitCount++;
-      log(`T1 HIT ✓ | ${pos.ticker} | ${t1pnl >= 0 ? "+" : "-"}$${Math.abs(t1pnl).toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${pos.takeProfit2.toFixed(4)}`);
+      log(`T1 HIT ✓ | ${pos.ticker} | ${t1pnl >= 0 ? "+" : "-"}$${Math.abs(t1pnl).toFixed(2)} locked | ${pos.sharesRemaining.toFixed(4)}sh → T2 $${px(pos.takeProfit2)}`);
     }
 
     // V17 BUG FIX #1: Unified priority exit chain — single evaluation, highest-priority wins

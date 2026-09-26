@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { formatPrice } from "@shared/price";
 import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import {
@@ -70,7 +71,7 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
       queryClient.invalidateQueries({ queryKey: ["/api/equity-curve"] });
       toast({
         title: "Trade Executed",
-        description: `Bought ${shares.toFixed(4)} shares of ${ticker} at $${price.toFixed(2)}`,
+        description: `Bought ${shares.toFixed(4)} shares of ${ticker} at $${formatPrice(price)}`,
       });
       setAmount("");
       setStopLoss("");
@@ -106,7 +107,7 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
             <span className="text-[#00bcd4] font-mono">{ticker}</span>
           </DialogTitle>
           <DialogDescription>
-            Current price: <span className="font-mono tabular-nums text-foreground">${price.toFixed(2)}</span>
+            Current price: <span className="font-mono tabular-nums text-foreground">${formatPrice(price)}</span>
             {" · "}
             Available: <span className="font-mono tabular-nums text-foreground">${cash.toFixed(2)}</span>
           </DialogDescription>

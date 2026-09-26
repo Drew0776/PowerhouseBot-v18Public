@@ -222,8 +222,8 @@ function NextGridLevelsHero() {
     .sort((a, b) => a.price - b.price)[0];
 
   const value = `${summary.bot.ticker} $${cp.toFixed(2)}`;
-  const buyTxt = nextBuy ? `buy $${nextBuy.price.toFixed(2)}` : "—";
-  const sellTxt = nextSell ? `sell $${nextSell.price.toFixed(2)}` : "—";
+  const buyTxt = nextBuy ? `buy $${formatPrice(nextBuy.price)}` : "—";
+  const sellTxt = nextSell ? `sell $${formatPrice(nextSell.price)}` : "—";
   const sub =
     active.length > 1
       ? `${buyTxt} / ${sellTxt} · +${active.length - 1} more bot${active.length - 1 === 1 ? "" : "s"}`
