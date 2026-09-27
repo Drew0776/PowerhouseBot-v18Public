@@ -152,6 +152,130 @@ interface BacktestResult {
   verdictMessage: string;
   degradation: number;
   recommendation: string;
+  acceptance: { passed: boolean; gates: AcceptanceGate[] };
+  calibration: CalibrationReport;
+}
+
+interface AcceptanceGate {
+  key: "sharpe" | "maxDrawdown" | "hitRate" | "tStat" | "history" | "netPnl";
+  label: string;
+  value: number | null;
+  threshold: string;
+  pass: boolean;
+  guardsAgainst: string;
+}
+
+interface CalibrationReport {
+  n: number;
+  brier: number | null;
+  baseRate: number | null;
+  referenceBrier: number | null;
+  skill: number | null;
+  bins: { lo: number; hi: number; n: number; meanP: number; hitRate: number }[];
+}
+
+function gateValue(g: AcceptanceGate): string {
+  if (g.value === null) return "—";
+  switch (g.key) {
+    case "maxDrawdown": case "hitRate": return `${fmt(g.value)}%`;
+    case "history": return g.value < 0.01 ? `${(g.value * 252 * 6.5).toFixed(1)} h` : `${fmt(g.value)} yr`;
+    case "netPnl": return signedUsd(g.value);
+    default: return fmt(g.value);
+  }
+}
+
+/** The backtest's acceptance test, one row per gate. */
+function AcceptanceTable({ gates }: { gates: AcceptanceGate[] }) {
+  return (
+    <div className="bg-[#0d0f12] border border-zinc-800 rounded-lg p-3" data-testid="acceptance-gates">
+      <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-600 mb-2">
+        Acceptance test · out-of-sample, after costs · {gates.filter(g => g.pass).length}/{gates.length} pass
+      </p>
+      <div className="space-y-1">
+        {gates.map(g => (
+          <div key={g.key} className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 items-center" title={`Guards against: ${g.guardsAgainst}`}>
+            <span className="text-[10px] text-zinc-400 font-mono truncate">{g.label}</span>
+            <span className="text-[10px] font-mono tabular-nums text-white text-right">{gateValue(g)}</span>
+            <span className="text-[10px] font-mono tabular-nums text-zinc-600">{g.threshold}</span>
+            <span className={`text-[9px] font-mono font-bold px-1.5 rounded ${g.pass ? "bg-[#00e676]/10 text-[#00e676]" : "bg-[#ff5555]/10 text-[#ff5555]"}`}>
+              {g.pass ? "PASS" : "FAIL"}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">
+        Sharpe and history are in market time: 2-second ticks over 6.5-hour sessions, 252 a year. A simulator run covers hours, not years, so the history gate can only pass on real historical data.
+      </p>
+    </div>
+  );
+}
+
+/** Brier score and reliability table for predicted win probabilities. */
+function CalibrationSummary({ c, title }: { c: CalibrationReport; title: string }) {
+  if (c.n === 0) {
+    return <p className="text-[10px] text-zinc-500 font-mono">{title}: no closed trades yet.</p>;
+  }
+  const skillColor = c.skill === null ? "text-zinc-400" : c.skill > 0.02 ? "text-[#00e676]" : c.skill < -0.02 ? "text-[#ff5555]" : "text-yellow-400";
+  return (
+    <div className="space-y-2" data-testid="calibration-summary">
+      <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-600">{title} · {c.n} trades</p>
+      <div className="grid grid-cols-3 gap-2">
+        {([
+          ["Brier score", c.brier !== null ? c.brier.toFixed(3) : "—", "0 is perfect"],
+          ["Base-rate Brier", c.referenceBrier !== null ? c.referenceBrier.toFixed(3) : "—", `always ${c.baseRate !== null ? Math.round(c.baseRate * 100) : "—"}%`],
+          ["Skill", c.skill !== null ? `${c.skill >= 0 ? "+" : ""}${c.skill.toFixed(3)}` : "—", "above 0 beats base rate"],
+        ] as [string, string, string][]).map(([label, val, sub], i) => (
+          <div key={label}>
+            <p className="text-[9px] text-zinc-500 font-mono">{label}</p>
+            <p className={`text-[12px] font-mono font-bold tabular-nums ${i === 2 ? skillColor : "text-white"}`}>{val}</p>
+            <p className="text-[9px] text-zinc-600">{sub}</p>
+          </div>
+        ))}
+      </div>
+      <div className="space-y-0.5">
+        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 text-[9px] font-mono text-zinc-600">
+          <span>Predicted</span><span className="text-right">Trades</span><span className="text-right">Mean p</span><span className="text-right">Won</span>
+        </div>
+        {c.bins.map(b => (
+          <div key={b.lo} className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 text-[10px] font-mono tabular-nums">
+            <span className="text-zinc-400">{Math.round(b.lo * 100)}–{Math.round(b.hi * 100)}%</span>
+            <span className="text-right text-zinc-300">{b.n}</span>
+            <span className="text-right text-zinc-300">{Math.round(b.meanP * 100)}%</span>
+            <span className={`text-right ${Math.abs(b.hitRate - b.meanP) <= 0.05 ? "text-[#00e676]" : "text-yellow-400"}`}>{Math.round(b.hitRate * 100)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Live calibration of the win probabilities the engine sizes trades with. */
+function CalibrationPanel() {
+  const { data } = useQuery<CalibrationReport & { byClass: Record<string, CalibrationReport> }>({
+    queryKey: ["/api/auto-trader/calibration"],
+    refetchInterval: 10000,
+  });
+  return (
+    <div className="bg-[#141720] border border-zinc-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Target className="w-4 h-4 text-cyan-400" />
+        <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Win-Probability Calibration</span>
+      </div>
+      <p className="text-[10px] text-zinc-500 leading-relaxed">
+        Each trade is sized with an estimated chance of ending in profit: its market class's win rate so far. When those estimates are right, trades predicted at 60% win about 60% of the time.
+      </p>
+      {data ? <CalibrationSummary c={data} title="All closed trades" /> : <p className="text-[10px] text-zinc-500 font-mono">Loading…</p>}
+      {data && Object.keys(data.byClass).length > 1 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {Object.entries(data.byClass).map(([mt, c]) => (
+            <span key={mt} className="text-[10px] font-mono text-zinc-400">
+              {mt}: {c.n} trades, Brier {c.brier !== null ? c.brier.toFixed(3) : "—"}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface EquityCurvePoint {
@@ -476,6 +600,8 @@ function BacktestPanel() {
             </div>
           </div>
 
+          {result.acceptance && <AcceptanceTable gates={result.acceptance.gates} />}
+
           {/* Side-by-side */}
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-[#0d0f12] border border-zinc-800 rounded-lg p-3">
@@ -539,6 +665,12 @@ function BacktestPanel() {
                 }} />
               </div>
               <p className="text-[9px] text-zinc-600 mt-1">&lt;20% = robust · 20-40% = acceptable · &gt;40% = overfit</p>
+            </div>
+          )}
+
+          {result.calibration && result.calibration.n > 0 && (
+            <div className="bg-[#0d0f12] border border-zinc-800 rounded-lg p-3">
+              <CalibrationSummary c={result.calibration} title="Out-of-sample win-probability calibration" />
             </div>
           )}
 
@@ -1637,6 +1769,7 @@ export default function AutoTraderPage() {
 
         {/* ── V16 Walk-Forward Backtest Panel ── */}
         <BacktestPanel />
+        <CalibrationPanel />
 
         {/* ── NEW SECTION 3: Market Heatmap Strip ── */}
         <MarketHeatmapStrip />

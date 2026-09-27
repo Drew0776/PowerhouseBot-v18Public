@@ -59,6 +59,19 @@ sqlite.exec(`
     key TEXT NOT NULL UNIQUE,
     value TEXT NOT NULL
   );
+
+  -- One row per closed auto-trader trade: the win probability the engine
+  -- sized it with, and whether it won. Scored by /api/auto-trader/calibration.
+  CREATE TABLE IF NOT EXISTS calibration (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER,
+    ticker TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    p REAL NOT NULL,
+    won INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    closed_at TEXT NOT NULL
+  );
 `);
 
 // getPortfolio() looks up open trades on every call.
@@ -445,6 +458,24 @@ export class DatabaseStorage implements IStorage {
 }
 
 export const storage = new DatabaseStorage();
+
+export type CalibrationRow = { tradeId: number; ticker: string; marketType: string; p: number; won: boolean; reason: string };
+
+/** Log a closed trade's predicted win probability and outcome. */
+export function recordCalibration(r: CalibrationRow): void {
+  sqlite.prepare(`INSERT INTO calibration (trade_id, ticker, market_type, p, won, reason, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(r.tradeId, r.ticker, r.marketType, r.p, r.won ? 1 : 0, r.reason, new Date().toISOString());
+}
+
+/** Every logged prediction, oldest first. */
+export function calibrationRows(): Array<{ p: number; won: boolean; marketType: string }> {
+  return (sqlite.prepare("SELECT p, won, market_type AS marketType FROM calibration ORDER BY id").all() as Array<{ p: number; won: number; marketType: string }>)
+    .map(r => ({ p: r.p, won: r.won === 1, marketType: r.marketType }));
+}
+
+export function clearCalibration(): void {
+  sqlite.prepare("DELETE FROM calibration").run();
+}
 
 /** Bug 8 fix: Safe helper — no unsafe cast needed in index.ts */
 export function getEngineStateJson(): string | null {
