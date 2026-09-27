@@ -199,8 +199,8 @@ test("US session gate: 9:30–16:00 ET on weekdays only", () => {
   assert.equal(isUsMarketOpen(new Date(2026, 8, 26, 12, 0)), false);  // Sat noon
 });
 
-test("backtest reports the in-sample balance at the split, not the final one", () => {
-  const r = runWalkForwardBacktest(400);
+test("backtest reports the in-sample balance at the split, not the final one", async () => {
+  const r = await runWalkForwardBacktest(400);
   const expectedOosReturn = ((r.outOfSample.finalBalance - r.inSample.finalBalance) / r.inSample.finalBalance) * 100;
   assert.ok(
     Math.abs(r.outOfSample.totalReturn - expectedOosReturn) < 0.05,

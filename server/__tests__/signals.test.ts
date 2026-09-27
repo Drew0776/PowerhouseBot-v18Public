@@ -95,8 +95,8 @@ test("risk per trade stays within the Kelly probe and cap", () => {
   for (const s of sigs) assert.ok(s.kellyFraction >= 0.0025 && s.kellyFraction <= 0.08, `${s.ticker} kf ${s.kellyFraction}`);
 });
 
-test("backtest counts each trade once and needs 30 out-of-sample trades to rule", () => {
-  const short = at.runWalkForwardBacktest(400);
+test("backtest counts each trade once and needs 30 out-of-sample trades to rule", async () => {
+  const short = await at.runWalkForwardBacktest(400);
   for (const half of [short.inSample, short.outOfSample]) {
     assert.equal(half.wins + half.losses, half.trades, "every trade is a win or a loss, T1 partials included");
   }

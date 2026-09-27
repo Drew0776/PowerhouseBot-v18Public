@@ -99,8 +99,8 @@ test("recycling picks the weakest eligible position, or none", () => {
   assert.equal(at.recycleCandidate([open[2], open[3]], v), null);
 });
 
-test("backtest pays for positions out of cash", () => {
-  const r = at.runWalkForwardBacktest(600);
+test("backtest pays for positions out of cash", async () => {
+  const r = await at.runWalkForwardBacktest(600);
   // With the old leverage (5 × 50% of balance) drawdowns ran far past what
   // cash-funded positions sized to a 0.25–8% stop-out can produce.
   assert.ok(r.inSample.finalBalance > 0 && r.outOfSample.finalBalance > 0);
@@ -178,4 +178,18 @@ test("signed money formatting", () => {
   assert.equal(signedUsd(-1.2), "-$1.20");
   assert.equal(signedUsd(-0.004), "$0.00");
   assert.equal(signedUsd(null), "—");
+});
+
+test("a running backtest leaves the event loop free for requests and bot loops", async () => {
+  // Longest stretch the event loop goes without running a timer while a
+  // backtest is in progress. A blocking run stalls for its whole duration.
+  let last = Date.now(), worst = 0;
+  const hb = setInterval(() => { const now = Date.now(); worst = Math.max(worst, now - last); last = now; }, 5);
+  const t0 = Date.now();
+  await at.runWalkForwardBacktest(800);
+  clearInterval(hb);
+  worst = Math.max(worst, Date.now() - last); // a fully blocked run never ticks at all
+  const ms = Date.now() - t0;
+  assert.ok(ms > 200, `run long enough to measure (${ms} ms)`);
+  assert.ok(worst < 100, `longest stall ${worst} ms during a ${ms} ms run`);
 });
