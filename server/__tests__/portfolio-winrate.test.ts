@@ -47,3 +47,28 @@ test("win rate is wins over closed positions", () => {
   storage.closeTrade(c.id, 5.5);                      // winner
   assert.equal(storage.getPortfolio().winRate, 66.67);
 });
+
+test("portfolio reads stay fast and current with a large trade history", () => {
+  sqlite.prepare("DELETE FROM trades").run();
+  const ins = sqlite.prepare(`INSERT INTO trades (ticker, action, shares, price, total, status, pnl, opened_at, closed_at)
+    VALUES (?, 'buy', 1, ?, ?, ?, ?, ?, ?)`);
+  sqlite.transaction(() => {
+    for (let i = 0; i < 10_000; i++) {
+      const open = i % 20 === 0;
+      ins.run("T" + (i % 150), 10 + (i % 97), 10, open ? "open" : "closed", open ? null : (i % 3) - 1,
+        new Date(1e12 + i * 1000).toISOString(), open ? null : new Date().toISOString());
+    }
+  })();
+  // This took ~1 s per read before the position index and history cache.
+  const t0 = performance.now();
+  const first = storage.getPortfolio();
+  for (let k = 0; k < 9; k++) storage.getPortfolio();
+  const perRead = (performance.now() - t0) / 10;
+  assert.ok(perRead < 100, `${perRead.toFixed(1)} ms per read`);
+
+  // The cache must notice new trades.
+  const t = open("ZZZ", 10, 1);
+  storage.closeTrade(t.id, 12);
+  const after = storage.getPortfolio();
+  assert.equal(Math.round((after.cash - first.cash) * 100) / 100, 2, "bought at $10, sold at $12");
+});

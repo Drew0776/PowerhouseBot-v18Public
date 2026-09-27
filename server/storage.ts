@@ -60,6 +60,8 @@ sqlite.exec(`
 // getPortfolio() looks up open trades on every call.
 sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)`);
 sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_equity_curve_ts ON equity_curve(timestamp)`);
+// closedPositionPnls() matches a position's rows on these columns.
+sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(ticker, opened_at, price, status)`);
 
 // Ensure stop_loss and take_profit columns exist (migration for existing DBs)
 try {
@@ -233,19 +235,40 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
-  getPortfolio(): PortfolioSummary {
-    // Called several times per engine tick and per grid tick, so the closed
-    // history is summed in SQL rather than loaded row by row; only open trades
-    // come back as rows. Same arithmetic as before: every buy spends its total,
-    // every closed trade with a P&L returns total + pnl.
+  /**
+   * Cash totals and the win record over the whole trade history. getPortfolio
+   * runs several times per engine tick and per grid tick, and both of these
+   * scan every trade, so they're cached until the trade table changes. The
+   * key comes from index lookups only: every write that changes a total adds
+   * a row, closes one or deletes some, which moves one of the three numbers.
+   * (Without the cache a portfolio read took ~1 s at 10,000 trades.)
+   */
+  private historyCache: { key: string; spent: number; returned: number; closedCount: number; winCount: number } | null = null;
+  private tradeHistory() {
+    const k = sqlite.prepare(`
+      SELECT (SELECT COUNT(*) FROM trades WHERE status = 'closed') AS c,
+             (SELECT COUNT(*) FROM trades WHERE status = 'open')   AS o,
+             (SELECT MAX(id) FROM trades)                           AS m
+    `).get() as { c: number; o: number; m: number | null };
+    const key = `${k.c}|${k.o}|${k.m}`;
+    if (this.historyCache?.key === key) return this.historyCache;
+    // Every buy spends its total; every closed trade with a P&L returns total + pnl.
     const agg = sqlite.prepare(`
       SELECT
         COALESCE(SUM(CASE WHEN action = 'buy' THEN total ELSE 0 END), 0)                          AS spent,
         COALESCE(SUM(CASE WHEN status = 'closed' AND pnl IS NOT NULL THEN total + pnl ELSE 0 END), 0) AS returned
       FROM trades
     `).get() as { spent: number; returned: number };
-    const closedPnls = this.closedPositionPnls();
-    const wr = { closedCount: closedPnls.length, winCount: closedPnls.filter(v => v > 0).length };
+    const pnls = this.closedPositionPnls();
+    this.historyCache = { key, ...agg, closedCount: pnls.length, winCount: pnls.filter(v => v > 0).length };
+    return this.historyCache;
+  }
+
+  getPortfolio(): PortfolioSummary {
+    // Only open trades come back as rows; the closed history is summarized
+    // (and cached) by tradeHistory().
+    const agg = this.tradeHistory();
+    const wr = agg;
     const openTrades = db.select().from(trades).where(eq(trades.status, "open")).orderBy(desc(trades.id)).all();
 
     const cash = STARTING_BALANCE - agg.spent + agg.returned;
