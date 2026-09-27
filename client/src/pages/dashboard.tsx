@@ -341,7 +341,9 @@ export default function Dashboard() {
             </div>
           </div>
           <p className="text-[10px] text-zinc-500 mt-2 font-mono leading-relaxed">
-            The bot trades a $500 simulation against real Alpaca prices. It does not place orders in your Alpaca account.
+            {alpacaStatus?.connected
+              ? "The bot trades a $500 simulation: US stocks use live Alpaca prices, everything else is simulated. It does not place orders in your Alpaca account."
+              : "The bot trades a $500 simulation on simulated prices: Alpaca isn't connected. It never places orders in your Alpaca account."}
           </p>
         </div>
 

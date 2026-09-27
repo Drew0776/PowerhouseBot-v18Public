@@ -12,11 +12,15 @@ import {
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
 import { eq, desc } from "drizzle-orm";
 import { generateAllStocks } from "./seed";
 import { getAlpacaPrice, ALPACA_STOCK_TICKERS } from "./alpaca";
 
-export const sqlite = new Database(process.env.DATA_DB_PATH ?? "data.db"); // V17: exported for shared use by grid-engine
+const DB_PATH = process.env.DATA_DB_PATH ?? "data.db";
+fs.mkdirSync(path.dirname(path.resolve(DB_PATH)), { recursive: true }); // e.g. a fresh /data volume
+export const sqlite = new Database(DB_PATH); // V17: exported for shared use by grid-engine
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
@@ -99,15 +103,9 @@ const DEFAULT_SETTINGS: UserSettings = {
   maxPositionPct: 20,
   stopLossPct: 10,
   takeProfitPct: 25,
-  scannerPennyActive: true,
-  scannerMomentumActive: true,
-  scannerSqueezeActive: true,
-  scannerOptionsActive: true,
-  minScoreThreshold: 40,
   alertsEnabled: true,
   alertBuySignals: true,
   alertSellSignals: true,
-  alertPriceAlerts: false,
 };
 
 // Grid bots reserve capital through an open "buy" trade. That trade must be

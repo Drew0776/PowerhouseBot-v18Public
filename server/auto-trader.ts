@@ -25,7 +25,10 @@
  *   Fix: forex cap 12% → 15%, trend window +10t, gate loosened
  */
 
-import { storage, getStockData, getStockByTicker, STARTING_BALANCE } from "./storage";
+// sqlite is imported, not require()d: this package is ESM, where require is
+// undefined, so the old require() threw and state was silently never saved in
+// development (the production bundle happened to resolve it).
+import { storage, sqlite, getStockData, getStockByTicker, STARTING_BALANCE } from "./storage";
 import {
   getAlpacaPrice,
   getAlpacaQuote,
@@ -42,6 +45,7 @@ import { roundPrice, formatPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
 import { estimateEdge, meanCI95 } from "./stats";
 import { simTickVol } from "./sim-vol";
+import { notify } from "./alerts";
 
 // ─── Task #49: Limit / Stop-Limit Order Config ───────────────────────────────
 //
@@ -484,6 +488,46 @@ function computeCompositeScore(f: PriceFeatures, mt: string): number | null {
   return Math.round(base * factor * 10) / 10;
 }
 
+/**
+ * What the engine currently thinks of every instrument, for the dashboards,
+ * computed from its own price history without advancing anything: the
+ * composite score (null while warming up or when a gate rejects it), the
+ * grade the scanner would assign by rank (top 20 only), RSI, and the price
+ * change across the sampled window (up to HIST_LEN ticks, ~4 minutes).
+ * The dashboards used to show scores fixed once at startup from random
+ * "fundamentals", which had nothing to do with what the bot traded.
+ */
+export interface LiveSignal { score: number | null; grade: Grade | null; rank: number | null; rsi: number | null; changePct: number | null }
+export function liveSignalView(): Map<string, LiveSignal> {
+  const out = new Map<string, LiveSignal>();
+  const ranked: Array<{ ticker: string; score: number }> = [];
+  for (const s of getStockData()) {
+    const mt = (s as any).marketType ?? "stock";
+    const h = _mtf.get(s.ticker) ?? [];
+    const f = featuresFrom(h);
+    const c = f && trendGate(h) ? computeCompositeScore(f, mt) : null;
+    const score = c !== null && c >= 20 ? c : null;
+    out.set(s.ticker, {
+      score, grade: null, rank: null, rsi: f ? Math.round(f.rsi * 10) / 10 : null,
+      changePct: h.length >= 2 ? Math.round((h[h.length - 1] / h[0] - 1) * 10000) / 100 : null,
+    });
+    if (score !== null) ranked.push({ ticker: s.ticker, score });
+  }
+  ranked.sort((a, b) => b.score - a.score);
+  ranked.forEach((r, i) => {
+    const v = out.get(r.ticker)!;
+    v.rank = i + 1;
+    if (i < 20) v.grade = gradeFor(i);
+  });
+  return out;
+}
+
+/** The engine's sampled prices and indicators for one instrument (read-only). */
+export function instrumentDetail(ticker: string): { history: number[]; features: PriceFeatures | null } {
+  const history = [...(_mtf.get(ticker) ?? [])];
+  return { history, features: featuresFrom(history) };
+}
+
 // ─── Market Regime ────────────────────────────────────────────────────────────
 
 function detectRegime(): "trending" | "ranging" {
@@ -859,6 +903,9 @@ function closePosition(pos: ActivePosition, fillPx: number, exitSlip: number, re
 
   const icon = closePnl >= 0 ? "✓" : "✗";
   log(`EXIT ${icon} ${reason.toUpperCase()} | ${pos.ticker} | ${pos.pnlPct >= 0 ? "+" : ""}${pos.pnlPct}% | Net ${closePnl >= 0 ? "+" : "-"}$${Math.abs(closePnl).toFixed(2)} | ${pos.ticksOpen} ticks`);
+  const usd = (v: number) => `${v < 0 ? "-" : "+"}$${Math.abs(v).toFixed(2)}`;
+  notify("exit", `Sold ${pos.ticker} (${reason.replace(/_/g, " ")})`,
+    `${pos.sharesRemaining.toFixed(4)} sh at $${px(fillPx)}. Trade result ${usd(tradePnl)} after ${pos.ticksOpen} ticks.`);
 }
 
 function enterTrade(sig: BreakoutSignal): ActivePosition | null {
@@ -983,6 +1030,8 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
   pending.status = "filled";
 
   log(`✅ FILL ${sig.grade} | ${sig.ticker}[${mt}] | ${sig.shares.toFixed(4)}sh @ $${px(curPrice)} (limit $${px(pending.limitPrice)}; $${px(fillPrice)} incl. costs) | Stop $${px(stopLoss)} | T1 $${px(takeProfit1)} | Score ${sig.score}`);
+  notify("entry", `Bought ${sig.ticker} (grade ${sig.grade}, score ${sig.score})`,
+    `${sig.shares.toFixed(4)} sh at $${px(fillPrice)} ($${total.toFixed(2)}). Stop $${px(stopLoss)}, first target $${px(takeProfit1)}.`);
   return pos;
 }
 
@@ -1033,7 +1082,26 @@ function tickPendingEntries(): ActivePosition[] {
 
 // ─── Manage Positions ─────────────────────────────────────────────────────────
 
+/**
+ * Forget positions whose trade was closed outside the engine (the Trade Log's
+ * close button, a portfolio reset, a restored position whose row is gone).
+ * The engine used to keep managing them and later booked P&L for a sale that
+ * never happened. Their real result is already in the trade row.
+ */
+function dropExternallyClosed(): void {
+  if (state.openPositions.length === 0) return;
+  const open = new Set(storage.getOpenTrades().map(t => t.id));
+  for (let i = state.openPositions.length - 1; i >= 0; i--) {
+    const pos = state.openPositions[i];
+    if (open.has(pos.tradeId)) continue;
+    state.openPositions.splice(i, 1);
+    cooldowns.set(pos.ticker, state.totalTicks);
+    log(`🧹 ${pos.ticker} was closed outside the engine; no longer tracked (its result is in the trade log)`);
+  }
+}
+
 function managePositions() {
+  dropExternallyClosed();
   const toClose: number[] = [];
 
   for (let i = 0; i < state.openPositions.length; i++) {
@@ -1122,9 +1190,11 @@ function checkCircuitBreaker() {
   if (p.totalValue <= 50 && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`🚨 HARD FLOOR $50 | Emergency stop`);
+    notify("breaker", "Circuit breaker: $50 hard floor", `Portfolio at $${p.totalValue.toFixed(2)}. New entries stopped and open positions are being closed.`);
   } else if (dd >= limit && !state.circuitBreakerActive) {
     state.circuitBreakerActive = true;
     log(`⚠️ CIRCUIT BREAKER | Drawdown ${(dd*100).toFixed(1)}% ≥ ${(limit*100).toFixed(0)}% limit | Paused`);
+    notify("breaker", "Circuit breaker tripped", `Down ${(dd * 100).toFixed(1)}% today (limit ${(limit * 100).toFixed(0)}%), portfolio $${p.totalValue.toFixed(2)}. New entries stopped and open positions are being closed.`);
   }
   // Once tripped the breaker stays latched for the auto-trader: it clears only
   // on a manual reset (resetCircuitBreaker) or when a new ET trading day
@@ -1146,6 +1216,7 @@ function rollDailyAnchor(markTick: number): void {
     dailyStart.tick  = markTick;
     dailyStart.dateKey = todayKey;
     if (isNewDay) {
+      notify("daily", "Daily summary", `Previous trading day: auto-trader realized ${state.dailyPnl < 0 ? "-" : "+"}$${Math.abs(state.dailyPnl).toFixed(2)}. Portfolio starts today at $${p.totalValue.toFixed(2)}.`);
       state.dailyPnl = 0; // Reset for new trading day
       if (state.circuitBreakerActive) {
         state.circuitBreakerActive = false;
@@ -1570,7 +1641,6 @@ function safeReplacer(_key: string, value: unknown): unknown {
 
 function persistState() {
   try {
-    const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
     const payload = {
       isRunning: state.isRunning,
       totalTicks: state.totalTicks,
@@ -1599,7 +1669,6 @@ function persistState() {
 
 function restoreState() {
   try {
-    const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
     const row = sqlite.prepare("SELECT state_json FROM engine_state WHERE id = 1").get() as { state_json: string } | undefined;
     if (!row) return;
     const s = JSON.parse(row.state_json);
@@ -1870,7 +1939,6 @@ export function resetAutoTraderState() {
 
   // Remove persisted state so next restart begins clean
   try {
-    const { sqlite } = require("./storage") as { sqlite: import("better-sqlite3").Database };
     sqlite.prepare("DELETE FROM engine_state WHERE id = 1").run();
   } catch (_e) { /* non-fatal */ }
 }

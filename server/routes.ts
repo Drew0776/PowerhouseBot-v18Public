@@ -2,9 +2,9 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage, sqlite, getStockData, getStockByTicker, getGridPrice, STARTING_BALANCE } from "./storage";
 import { requireAuth, passport } from "./auth";
-import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow } from "./seed";
+import { scorePennyStock, scoreMomentum, scoreSqueeze, generateOptionsFlow, STOCK_INFO } from "./seed";
 import { nextSessionChange } from "./market-calendar";
-import type { MarketStatus } from "@shared/schema";
+import type { MarketStatus, InstrumentDetail } from "@shared/schema";
 import {
   createGridBot,
   getAllGridBots,
@@ -37,26 +37,13 @@ import {
   resetCircuitBreaker,
   isCircuitBreakerActive,
   getScanDebug,
+  liveSignalView,
+  instrumentDetail,
 } from "./auto-trader";
 
-// ─── V17: Telegram Alert Helper ─────────────────────────────────────────────
-// Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in environment to enable alerts
-// Get bot token: https://t.me/BotFather | Get chat ID: https://t.me/userinfobot
-async function sendTelegramAlert(message: string): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return; // Silent if not configured
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: "HTML" }),
-    });
-  } catch (_e) { /* non-fatal */ }
-}
+import { sendTelegramAlert } from "./alerts";
 
-// Export so auto-trader can call it for circuit breaker + signal alerts
-export { sendTelegramAlert };
+
 
 // Alpaca feed
 import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed } from "./alpaca";
@@ -142,54 +129,73 @@ export async function registerRoutes(
     }
   });
 
-  // GET /api/signals — all instruments with scores and market metadata
+  // GET /api/signals — every instrument with the engine's live view of it.
+  // Scores, grades and RSI come from the auto-trader's own price history
+  // (liveSignalView), so they match what it trades; they're empty until it
+  // has run long enough to warm up. "BUY" marks the top five by rank, the
+  // same pool the engine enters from. (These used to be random scores fixed
+  // at startup.)
   app.get("/api/signals", (_req, res) => {
     try {
-      const stocks = getStockData();
-      const signals = stocks.map((s, i) => {
-        // Use real Alpaca price for tracked US stocks when feed is live
-        const livePrice = ALPACA_STOCK_TICKERS.has(s.ticker) ? (getAlpacaPrice(s.ticker) ?? s.price) : s.price;
-        return ({
-        rank: i + 1,
-        ticker: s.ticker,
-        name: s.name,
-        price: livePrice,
-        dayChangePercent: s.dayChangePercent,
-        volumeVsAvg: Math.round((s.volume / s.avgVolume) * 100) / 100,
-        momentumScore: s.momentumScore,
-        sentimentScore: s.sentimentScore,
-        compositeScore: s.compositeScore,
-        signal: s.signal,
-        sparkline: s.history.slice(-7).map((c) => c.close),
-        // Multi-market fields
-        category: s.category,
-        marketType: s.marketType,
-        exchange: s.exchange,
-        tradingHours: s.tradingHours,
-        sector: s.sector,
-        rsi: s.rsi,
-        volumeSpikeRatio: s.volumeSpikeRatio,
-        shortInterestPct: s.shortInterestPct,
-        floatShares: s.floatShares,
-        livePrice: ALPACA_STOCK_TICKERS.has(s.ticker) && getAlpacaPrice(s.ticker) != null,
+      const view = liveSignalView();
+      const rows = getStockData().map(s => {
+        const live = ALPACA_STOCK_TICKERS.has(s.ticker) ? getAlpacaPrice(s.ticker) : null;
+        const v = view.get(s.ticker);
+        return {
+          rank: v?.rank ?? null,
+          ticker: s.ticker,
+          name: s.name,
+          price: live ?? s.price,
+          livePrice: live != null,
+          changePct: v?.changePct ?? null,
+          compositeScore: v?.score ?? null,
+          grade: v?.grade ?? null,
+          rsi: v?.rsi ?? null,
+          signal: v?.rank != null && v.rank <= 5 ? "BUY" as const : "HOLD" as const,
+          category: s.category,
+          marketType: s.marketType,
+          exchange: s.exchange,
+          tradingHours: s.tradingHours,
+          sector: s.sector,
+        };
       });
-      });
-      res.json(signals);
+      rows.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+      res.json(rows);
     } catch (err) {
       res.status(500).json({ message: "Failed to get signals" });
     }
   });
 
-  // GET /api/signals/:ticker — individual stock detail with history
+  // GET /api/signals/:ticker — what the bot actually knows about one
+  // instrument: its sampled prices, the indicators it trades on, and its
+  // score and rank. (This used to return a fabricated 30-day chart, analyst
+  // ratings credited to real banks, invented news, short interest and an
+  // earnings date.)
   app.get("/api/signals/:ticker", (req, res) => {
     try {
       const ticker = req.params.ticker.toUpperCase();
       const stock = getStockByTicker(ticker);
-      if (!stock) {
-        return res.status(404).json({ message: "Stock not found" });
-      }
-      const livePrice = ALPACA_STOCK_TICKERS.has(ticker) ? (getAlpacaPrice(ticker) ?? stock.price) : stock.price;
-      res.json({ ...stock, price: livePrice, livePrice: ALPACA_STOCK_TICKERS.has(ticker) && getAlpacaPrice(ticker) != null });
+      if (!stock) return res.status(404).json({ message: "Stock not found" });
+      const live = ALPACA_STOCK_TICKERS.has(ticker) ? getAlpacaPrice(ticker) : null;
+      const { history, features } = instrumentDetail(ticker);
+      const v = liveSignalView().get(ticker);
+      const info = STOCK_INFO[ticker];
+      const detail: InstrumentDetail = {
+        ticker, name: stock.name, sector: stock.sector, category: stock.category,
+        marketType: stock.marketType ?? "stock", exchange: stock.exchange ?? null,
+        price: live ?? stock.price, livePrice: live != null,
+        history,
+        indicators: features && {
+          rsi: features.rsi, pctB: features.pctB, emaFast: features.emaFast, emaSlow: features.emaSlow,
+          macdHist: features.macdHist, sigma: features.sigma, momZ: features.momZ,
+        },
+        score: v?.score ?? null, grade: v?.grade ?? null, rank: v?.rank ?? null, changePct: v?.changePct ?? null,
+        reference: {
+          marketCapBillions: info?.marketCapBillions ? info.marketCapBillions : null,
+          beta: info && Number.isFinite(info.beta) ? info.beta : null,
+        },
+      };
+      res.json(detail);
     } catch (err) {
       res.status(500).json({ message: "Failed to get stock detail" });
     }
@@ -355,8 +361,10 @@ export async function registerRoutes(
     if (!token || !chatId) {
       return res.json({ connected: false, message: "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable alerts" });
     }
-    await sendTelegramAlert("🤖 <b>Powerhouse V17 Connected!</b>\nTelegram alerts are active. You'll receive:\n• 🚦 New trade signals\n• 🚨 Circuit breaker triggers\n• 📊 Daily P&L summaries");
-    res.json({ connected: true, message: "Test alert sent to your Telegram!" });
+    const ok = await sendTelegramAlert("🤖 <b>PowerhouseBot connected</b>\nYou'll get alerts when the auto-trader opens or closes a position, when the circuit breaker trips, and a daily P&amp;L summary. Turn them off in Settings → Notifications.");
+    res.json(ok
+      ? { connected: true, message: "Test alert sent to your Telegram!" }
+      : { connected: false, message: "Telegram rejected the message. Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID." });
   });
 
   // POST /api/settings — only known keys, with the right types and ranges.
@@ -365,16 +373,10 @@ export async function registerRoutes(
     maxPositionPct: pct,
     stopLossPct: pct,
     takeProfitPct: z.number().finite().min(0).max(1000),
-    scannerPennyActive: z.boolean(),
-    scannerMomentumActive: z.boolean(),
-    scannerSqueezeActive: z.boolean(),
-    scannerOptionsActive: z.boolean(),
-    minScoreThreshold: pct,
     alertsEnabled: z.boolean(),
     alertBuySignals: z.boolean(),
     alertSellSignals: z.boolean(),
-    alertPriceAlerts: z.boolean(),
-  }).partial().strict();
+  }).partial().strip(); // unknown keys (including the removed settings) are dropped
 
   app.post("/api/settings", requireAuth, (req, res) => {
     try {

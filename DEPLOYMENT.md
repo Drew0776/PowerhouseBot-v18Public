@@ -105,6 +105,19 @@ Open **Publishing → Settings** and pick a larger Reserved VM tier.
 Replit will rebuild and migrate. No code changes are needed — the
 engine is single-process and CPU/RAM-bound, not horizontally scaled.
 
+## Docker and Railway
+
+The `Dockerfile` (which Railway builds, see `railway.toml`) keeps the
+database at `/data/data.db` (`DATA_DB_PATH`) and declares `/data` as a
+volume. **Attach persistent storage there**, or every redeploy starts from
+an empty database and loses all trades, grid bots and engine state:
+
+- Docker: `docker run -v powerhouse-data:/data -p 5000:5000 -e OPERATOR_PASSWORD=... powerhouse`
+- Railway: add a Volume to the service with mount path `/data`.
+
+On Replit the database stays in the project directory, which persists
+across redeploys, so nothing changes there.
+
 ## Known limits
 
 - **SQLite is single-instance.** Reserved VM only runs one process, so
