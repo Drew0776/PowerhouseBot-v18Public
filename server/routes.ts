@@ -39,6 +39,7 @@ import {
   getScanDebug,
   liveSignalView,
   instrumentDetail,
+  liveCalibration,
 } from "./auto-trader";
 
 import { sendTelegramAlert } from "./alerts";
@@ -611,6 +612,16 @@ export async function registerRoutes(
       res.json(getScanDebug());
     } catch (err) {
       res.status(500).json({ message: "Failed to scan-debug" });
+    }
+  });
+
+  // GET /api/auto-trader/calibration — Brier score and reliability table of
+  // the win probabilities the engine sized its closed trades with.
+  app.get("/api/auto-trader/calibration", requireAuth, (_req, res) => {
+    try {
+      res.json(liveCalibration());
+    } catch (err) {
+      res.status(500).json({ message: "Failed to read calibration" });
     }
   });
 
