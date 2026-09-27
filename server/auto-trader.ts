@@ -28,7 +28,7 @@
 // sqlite is imported, not require()d: this package is ESM, where require is
 // undefined, so the old require() threw and state was silently never saved in
 // development (the production bundle happened to resolve it).
-import { storage, sqlite, getStockData, getStockByTicker, STARTING_BALANCE } from "./storage";
+import { storage, sqlite, getStockData, getStockByTicker, STARTING_BALANCE, recordCalibration, calibrationRows, clearCalibration } from "./storage";
 import {
   getAlpacaPrice,
   getAlpacaQuote,
@@ -43,7 +43,7 @@ import { isRegularSessionOpen } from "./market-calendar";
 import { rsi as rsiOf, ema, macd, bollingerPctB, realizedVol, momentumZ } from "./indicators";
 import { roundPrice, formatPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
-import { estimateEdge, meanCI95 } from "./stats";
+import { classEdge, meanCI95, tStat, annualisedSharpe, calibrationReport, type EdgeRecord, type CalibrationReport } from "./stats";
 import { simTickVol } from "./sim-vol";
 import { notify } from "./alerts";
 
@@ -103,6 +103,8 @@ export interface BreakoutSignal {
   riskRewardRatio: number;
   atr: number;
   marketType: string;
+  /** Estimated chance this trade ends in profit: the engine's win rate for the class (see classEdge). */
+  winProb: number;
 }
 
 export interface ActivePosition {
@@ -129,6 +131,10 @@ export interface ActivePosition {
   atr: number;
   ticksOpen: number;
   marketType: string;
+  /** winProb of the signal it was opened on; scored against the result at close (calibration). */
+  winProb?: number;
+  /** True while it is held because its live quote is stale. */
+  staleHold?: boolean;
 }
 
 export interface AutoTraderState {
@@ -223,11 +229,29 @@ function isLiveStock(ticker: string): boolean {
   return isAlpacaConfigured() && ALPACA_STOCK_TICKERS.has(ticker);
 }
 
+/**
+ * A live-priced position whose quote has gone stale (none in the last 30 s):
+ * the engine holds it instead of deciding exits on the last price seen.
+ */
+export function holdsOnStaleQuote(ticker: string): boolean {
+  return isLiveStock(ticker) && !getAlpacaQuote(ticker);
+}
+
+/**
+ * Oldest live quote a new entry may be priced from. Quotes older than 30 s
+ * already read as missing; entries need fresher ones. 20 s leaves room for
+ * one 15 s REST refresh (the free WS covers only some symbols) and a quote
+ * timestamped a few seconds before it was fetched.
+ */
+export const ENTRY_MAX_QUOTE_AGE_MS = 20_000;
+
 /** Why a new entry in this ticker is blocked right now, or null if allowed. */
-function entryBlockReason(ticker: string): string | null {
+export function entryBlockReason(ticker: string, etClock: Date = etNow()): string | null {
   if (!isLiveStock(ticker)) return null;
-  if (!isUsMarketOpen()) return "market_closed";
-  if (!getAlpacaQuote(ticker)) return "no_live_quote";
+  if (!isUsMarketOpen(etClock)) return "market_closed";
+  const q = getAlpacaQuote(ticker);
+  if (!q) return "no_live_quote";
+  if (q.freshMs > ENTRY_MAX_QUOTE_AGE_MS) return "stale_quote";
   return null;
 }
 
@@ -548,8 +572,9 @@ function detectRegime(): "trending" | "ranging" {
 function sizePosition(
   compositeScore: number,
   portfolio: { cash: number; totalValue: number },
-  record: { wins: number; losses: number; totalWin: number; totalLoss: number },
-): { posSize: number; kf: number } {
+  record: EdgeRecord,
+  classRecord?: EdgeRecord,
+): { posSize: number; kf: number; pWin: number } {
   const { cash, totalValue } = portfolio;
 
   // Compounding multiplier
@@ -560,12 +585,15 @@ function sizePosition(
              : 1.0;
 
   // Risk per trade from the Kelly criterion, f* = p − (1 − p)/b, with p and b
-  // estimated from this engine's own closed trades (shrunk toward p = ½,
-  // b = 1 while the record is short). Half-Kelly, capped at KELLY_CAP. With
-  // no measured edge (f* ≤ 0) it keeps trading at a small probe risk so it
-  // can still gather evidence. (This used to treat the ranking score as a win
-  // probability, which it isn't.)
-  const edge = estimateEdge(record);
+  // estimated from this engine's own closed trades in the same market class,
+  // shrunk toward the pooled record of all classes (and that toward p = ½,
+  // b = 1) while the record is short. b is the realised average win ÷ average
+  // loss, not the planned target ÷ stop: most trades leave at T1, the trail
+  // or the time limit, not at T2. Half-Kelly, capped at KELLY_CAP. With no
+  // measured edge (f* ≤ 0) it keeps trading at a small probe risk so it can
+  // still gather evidence. (The ranking score is not a win probability and
+  // isn't used as one.)
+  const edge = classEdge(classRecord, record);
   const kf = Math.max(PROBE_RISK, Math.min(edge.kelly / 2, KELLY_CAP));
 
   // V9 AUDIT FIX: 30-40% of cash per position
@@ -573,7 +601,7 @@ function sizePosition(
   let posSize = cash * (POS_MIN_PCT + (compositeScore / 100) * (POS_MAX_PCT - POS_MIN_PCT));
   posSize = Math.min(posSize * mult, cash * 0.95);
 
-  return { posSize: Math.round(posSize * 100) / 100, kf };
+  return { posSize: Math.round(posSize * 100) / 100, kf, pWin: edge.p };
 }
 
 // ─── Shared trade rules ──────────────────────────────────────────────────────
@@ -597,14 +625,15 @@ export function gradeFor(rankIdx: number): Grade {
 export function planEntry(
   price: number, atr: number, composite: number, grade: Grade, mt: string,
   portfolio: { cash: number; totalValue: number },
-  record: { wins: number; losses: number; totalWin: number; totalLoss: number },
-): { stop: number; tp1: number; tp2: number; posSize: number; shares: number; kf: number; rr: number } {
+  record: EdgeRecord,
+  classRecord?: EdgeRecord,
+): { stop: number; tp1: number; tp2: number; posSize: number; shares: number; kf: number; rr: number; pWin: number } {
   const stop = Math.max(stopFloor(price), roundPrice(price - STOP_MULT * atr));
   const tp1  = roundPrice(price + TP1_MULT * atr);
   const tp2  = roundPrice(price + TP2_MULT * atr);
   const rr   = (tp1 - price) / Math.max(price - stop, price * 1e-6);
 
-  let { posSize, kf } = sizePosition(composite, portfolio, record);
+  let { posSize, kf, pWin } = sizePosition(composite, portfolio, record, classRecord);
   // V14 AUDIT FIX: Grade-based sizing — A+=100%  A=85%  B=60%  C=40%
   posSize *= grade === "A+" ? 1.0 : grade === "A" ? 0.85 : grade === "B" ? 0.60 : 0.40;
   posSize = Math.min(posSize, portfolio.totalValue * (mt === "forex" ? 0.15 : 0.25));
@@ -612,7 +641,7 @@ export function planEntry(
   if (stopPct > 0) posSize = Math.min(posSize, (portfolio.totalValue * kf) / stopPct);
   posSize = Math.floor(posSize * 100) / 100; // round down: never past the limit
   const shares = Math.max(0.0001, Math.floor((posSize / price) * 10000) / 10000);
-  return { stop, tp1, tp2, posSize, shares, kf, rr };
+  return { stop, tp1, tp2, posSize, shares, kf, rr, pWin };
 }
 
 /** Diversification: at most two stocks, and one position in each other class. */
@@ -757,8 +786,8 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
     const price = s.price;
     const atr   = estimateATR(r.ticker, r.mt, price);
     if (portfolio.cash < 1) continue;
-    const { stop, tp1, tp2, posSize, shares, kf, rr } =
-      planEntry(price, atr, r.compositeScore, grade, r.mt, portfolio, edgeRecord());
+    const { stop, tp1, tp2, posSize, shares, kf, rr, pWin } =
+      planEntry(price, atr, r.compositeScore, grade, r.mt, portfolio, edgeRecord(), classRecords.get(r.mt));
     if (posSize < 0.10) continue;
 
     signals.push({
@@ -780,6 +809,7 @@ export function scanForBreakouts(opts: { advance?: boolean } = {}): BreakoutSign
       riskRewardRatio: Math.round(rr * 100) / 100,
       atr,
       marketType: r.mt,
+      winProb: Math.round(pWin * 1000) / 1000,
     });
   }
 
@@ -816,8 +846,18 @@ const dailyStart = { value: STARTING_BALANCE, tick: 0, dateKey: '' }; // V17: da
 const pnlHistory: number[] = [];
 
 /** This engine's closed-trade record, the input to Kelly sizing. */
-function edgeRecord() {
+function edgeRecord(): EdgeRecord {
   return { wins, losses, totalWin: totalWinAmt, totalLoss: totalLossAmt };
+}
+
+/** The same record split by market class (stock, crypto, forex, …). */
+const classRecords = new Map<string, EdgeRecord>();
+
+/** Add a closed trade's result to its class record. */
+export function addToRecord(book: Map<string, EdgeRecord>, mt: string, tradePnl: number): void {
+  const r = book.get(mt) ?? { wins: 0, losses: 0, totalWin: 0, totalLoss: 0 };
+  if (tradePnl > 0) { r.wins++; r.totalWin += tradePnl; } else { r.losses++; r.totalLoss += Math.abs(tradePnl); }
+  book.set(mt, r);
 }
 
 function log(msg: string) {
@@ -896,6 +936,10 @@ function closePosition(pos: ActivePosition, fillPx: number, exitSlip: number, re
     losses++; totalLossAmt += Math.abs(tradePnl);
   }
   pnlHistory.push(tradePnl);
+  addToRecord(classRecords, pos.marketType, tradePnl);
+  if (typeof pos.winProb === "number") {
+    recordCalibration({ tradeId: pos.tradeId, ticker: pos.ticker, marketType: pos.marketType, p: pos.winProb, won: tradePnl > 0, reason });
+  }
   cooldowns.set(pos.ticker, state.totalTicks);
   state.closedTrades++;
   state.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
@@ -1023,6 +1067,7 @@ function fillPendingEntry(pending: PendingEntry): ActivePosition | null {
     enteredAt: new Date().toISOString(),
     tier1Hit: false, status: "running",
     atr: sig.atr, ticksOpen: 0, marketType: mt,
+    winProb: sig.winProb,
   };
 
   state.openPositions.push(pos);
@@ -1112,6 +1157,18 @@ function managePositions() {
     const mt = pos.marketType;
     const newPrice = advancePrice(pos.ticker, mt);
     const cur = newPrice > 0 ? newPrice : stock.price;
+
+    // A live position with no fresh quote holds: its mark is the last price
+    // seen, and a stop, target or time exit decided on it would sell at a
+    // price the market may no longer offer. Decisions resume with the next
+    // fresh quote. (The daily circuit breaker's sell waits for it too.)
+    if (holdsOnStaleQuote(pos.ticker)) {
+      pos.ticksOpen++;
+      if (!pos.staleHold) log(`⏸ HOLD | ${pos.ticker} | quote stale — no exits until a fresh quote arrives`);
+      pos.staleHold = true;
+      continue;
+    }
+    if (pos.staleHold) { pos.staleHold = false; log(`▶ RESUME | ${pos.ticker} | fresh quote`); }
 
     pos.currentPrice = roundPrice(cur);
     pos.pnl = Math.round((pos.currentPrice - pos.entryPrice) * pos.sharesRemaining * 100) / 100;
@@ -1324,6 +1381,56 @@ export interface BacktestResult {
   verdictMessage: string;
   degradation: number;
   recommendation: string;
+  /** The acceptance test a strategy must pass before it trades (see ACCEPTANCE). */
+  acceptance: { passed: boolean; gates: AcceptanceGate[] };
+  /** Out-of-sample win-probability calibration. */
+  calibration: CalibrationReport;
+}
+
+export interface AcceptanceGate {
+  key: "sharpe" | "maxDrawdown" | "hitRate" | "tStat" | "history" | "netPnl";
+  label: string;
+  value: number | null;
+  /** How the value is shown, e.g. "≥ 1.5". */
+  threshold: string;
+  pass: boolean;
+  guardsAgainst: string;
+}
+
+/**
+ * Acceptance test for a strategy, measured on out-of-sample data after
+ * costs: annualised Sharpe ≥ 1.5, max drawdown ≤ 15%, hit rate ≥ 55%,
+ * t-statistic of the mean trade ≥ 2, at least 5 years of history tested, and
+ * a net profit. A strategy has to pass every gate.
+ */
+export const ACCEPTANCE = { sharpe: 1.5, maxDrawdownPct: 15, hitRatePct: 55, tStat: 2, years: 5 } as const;
+
+/**
+ * Market time per engine tick: ticks are 2 s apart, counted over 6.5-hour US
+ * sessions, 252 a year. Used to annualise Sharpe and to express a backtest's
+ * length in years.
+ */
+export const TICKS_PER_YEAR = 252 * 6.5 * 3600 / 2;
+
+/** Run the acceptance test. Inputs are out-of-sample except `years`, which covers the whole run. */
+export function acceptanceGates(m: {
+  sharpe: number | null; maxDrawdownPct: number; hitRatePct: number | null; tStat: number | null; years: number; netPnl: number;
+}): AcceptanceGate[] {
+  const A = ACCEPTANCE;
+  return [
+    { key: "sharpe", label: "Out-of-sample Sharpe (annualised)", value: m.sharpe, threshold: `≥ ${A.sharpe}`,
+      pass: m.sharpe !== null && m.sharpe >= A.sharpe, guardsAgainst: "No real edge" },
+    { key: "maxDrawdown", label: "Max drawdown", value: m.maxDrawdownPct, threshold: `≤ ${A.maxDrawdownPct}%`,
+      pass: m.maxDrawdownPct <= A.maxDrawdownPct, guardsAgainst: "Ruin" },
+    { key: "hitRate", label: "Hit rate", value: m.hitRatePct, threshold: `≥ ${A.hitRatePct}%`,
+      pass: m.hitRatePct !== null && m.hitRatePct >= A.hitRatePct, guardsAgainst: "Luck streaks" },
+    { key: "tStat", label: "t-statistic of mean trade", value: m.tStat, threshold: `≥ ${A.tStat}`,
+      pass: m.tStat !== null && m.tStat >= A.tStat, guardsAgainst: "Noise" },
+    { key: "history", label: "History tested (years)", value: m.years, threshold: `≥ ${A.years}`,
+      pass: m.years >= A.years, guardsAgainst: "Overfitting to one regime" },
+    { key: "netPnl", label: "Net P&L after costs", value: m.netPnl, threshold: "> $0",
+      pass: m.netPnl > 0, guardsAgainst: "Fees eating a thin edge" },
+  ];
 }
 
 /**
@@ -1370,6 +1477,7 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
     hwm: number; sharesRem: number; atr: number; tier1Hit: boolean; ticks: number; enteredAt: number;
     cur: number; pnlPct: number;
     t1pnl: number; // P&L already realized by the T1 partial; counted into the trade at close
+    p: number;     // estimated win probability at entry (calibration)
   }
 
   const positions: SimPos[] = [];
@@ -1377,6 +1485,9 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
   const equity = () => cash + positions.reduce((a, p) => a + p.sharesRem * p.cur, 0);
   let peak = STARTING_BALANCE, maxDD_IS = 0, maxDD_OOS = 0, balAtSplit = STARTING_BALANCE;
   const record = { wins: 0, losses: 0, totalWin: 0, totalLoss: 0 }; // feeds Kelly sizing
+  const classBook = new Map<string, EdgeRecord>();                 // the same, per market class
+  const oosEquity: number[] = [];                                  // equity each out-of-sample tick
+  const oosCal: Array<{ p: number; won: boolean }> = [];
   const half = { is: { w: 0, l: 0, wa: 0, la: 0, t: 0, sl: 0 }, oos: { w: 0, l: 0, wa: 0, la: 0, t: 0, sl: 0 } };
   const oosTradePnls: number[] = [];
   const side = (enteredAt: number) => (enteredAt <= splitAt ? half.is : half.oos);
@@ -1392,7 +1503,8 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
     h.t++; h.sl += fill.cost;
     if (tradePnl > 0) { h.w++; h.wa += tradePnl; record.wins++; record.totalWin += tradePnl; }
     else { h.l++; h.la += Math.abs(tradePnl); record.losses++; record.totalLoss += Math.abs(tradePnl); }
-    if (pos.enteredAt > splitAt) oosTradePnls.push(tradePnl);
+    addToRecord(classBook, pos.mt, tradePnl);
+    if (pos.enteredAt > splitAt) { oosTradePnls.push(tradePnl); oosCal.push({ p: pos.p, won: tradePnl > 0 }); }
     lCooldowns.set(pos.ticker, tick);
     positions.splice(pi, 1);
   }
@@ -1439,6 +1551,7 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
     if (tick <= splitAt && dd > maxDD_IS) maxDD_IS = dd;
     if (tick > splitAt && dd > maxDD_OOS) maxDD_OOS = dd;
     if (tick === splitAt) balAtSplit = eq;
+    if (tick >= splitAt) oosEquity.push(eq);
 
     // Rank and plan entries exactly as scanForBreakouts does.
     const ranked: Array<{ ticker: string; mt: string; composite: number; price: number; sigma: number }> = [];
@@ -1458,7 +1571,7 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
     const signals = ranked.slice(0, 20).map((r, i) => {
       const grade = gradeFor(i);
       const atr = atrFrom(r.price, r.sigma, getVol(r.ticker, r.mt));
-      return { ...r, grade, atr, plan: planEntry(r.price, atr, r.composite, grade, r.mt, portfolio, record) };
+      return { ...r, grade, atr, plan: planEntry(r.price, atr, r.composite, grade, r.mt, portfolio, record, classBook.get(r.mt)) };
     }).filter(sg => sg.plan.posSize >= 0.10);
 
     // Entry loop: same limits and checks as autoTraderTick / enterTrade.
@@ -1492,7 +1605,7 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
         ticker: sg.ticker, mt: sg.mt, entry: fillPrice, stop, trail: stop,
         tp1: roundPrice(sg.plan.tp1 + shift), tp2: roundPrice(sg.plan.tp2 + shift),
         hwm: fillPrice, sharesRem: shares, atr: sg.atr, tier1Hit: false, ticks: 0, enteredAt: tick,
-        cur: sg.price, pnlPct: 0, t1pnl: 0,
+        cur: sg.price, pnlPct: 0, t1pnl: 0, p: sg.plan.pWin,
       });
       entered++;
     }
@@ -1518,14 +1631,29 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
   const isR  = mk(splitAt, isT,  isW,  isL,  isWA,  isLA,  isSl,  STARTING_BALANCE, balAtSplit, maxDD_IS);
   const oosR = mk(totalTicks - splitAt, oosT, oosW, oosL, oosWA, oosLA, oosSl, balAtSplit, bal, maxDD_OOS);
 
-  // Verdict from a 95% confidence interval on the mean out-of-sample trade
-  // P&L, with at least BACKTEST_MIN_TRADES trades. (It used to rule on
-  // profit-factor thresholds with as few as 3 trades.)
+  // Verdict: the acceptance test (ACCEPTANCE), with at least
+  // BACKTEST_MIN_TRADES out-of-sample trades before it rules at all. The 95%
+  // confidence interval on the mean trade is reported alongside. (It used to
+  // pass anything whose interval sat above zero.)
   const ci = meanCI95(oosTradePnls);
   const hasStat = ci !== null && ci.n >= BACKTEST_MIN_TRADES;
   const degrad = hasStat && isR.profitFactor > 0 && isR.profitFactor < 99 && oosR.profitFactor < 99
     ? Math.round(((isR.profitFactor - oosR.profitFactor) / isR.profitFactor) * 10000) / 100 : 0;
   const usd = (v: number) => (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(2);
+  const r2 = (v: number | null) => (v === null ? null : Math.round(v * 100) / 100);
+
+  const t = tStat(oosTradePnls);
+  const gates = acceptanceGates({
+    sharpe: r2(annualisedSharpe(oosEquity, TICKS_PER_YEAR)),
+    maxDrawdownPct: oosR.maxDrawdown,
+    hitRatePct: oosT > 0 ? oosR.winRate : null,
+    tStat: r2(t),
+    years: Math.round((totalTicks / TICKS_PER_YEAR) * 1e6) / 1e6,
+    netPnl: Math.round((bal - balAtSplit) * 100) / 100,
+  });
+  const failed = gates.filter(g => !g.pass);
+  const passed = hasStat && failed.length === 0;
+  const ciText = ci ? `mean out-of-sample trade ${usd(ci.mean)} (95% CI ${usd(ci.lo)} to ${usd(ci.hi)}, ${ci.n} trades)` : "";
 
   let verdict: "PASS" | "FAIL" | "MARGINAL";
   let msg: string, rec: string;
@@ -1533,21 +1661,22 @@ export async function runWalkForwardBacktest(totalTicks = 1000): Promise<Backtes
     verdict = "MARGINAL";
     msg = `Only ${oosT} out-of-sample trades; at least ${BACKTEST_MIN_TRADES} are needed before the result means anything.`;
     rec = "Run a longer backtest (2K–5K ticks).";
-  } else if (ci!.lo > 0) {
+  } else if (passed) {
     verdict = "PASS";
-    msg = `Mean out-of-sample trade ${usd(ci!.mean)} (95% CI ${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) is above zero.`;
-    rec = "Edge measured on unseen simulated prices. Confirm it on live paper data before relying on it.";
-  } else if (ci!.hi < 0) {
-    verdict = "FAIL";
-    msg = `Mean out-of-sample trade ${usd(ci!.mean)} (95% CI ${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) is below zero: it loses money on unseen data.`;
-    rec = "Don't trade this configuration.";
+    msg = `Passes all ${gates.length} acceptance gates; ${ciText}.`;
+    rec = "Confirm it on live paper data before relying on it.";
   } else {
-    verdict = "MARGINAL";
-    msg = `Mean out-of-sample trade ${usd(ci!.mean)}, but the 95% CI (${usd(ci!.lo)} to ${usd(ci!.hi)}, ${ci!.n} trades) includes zero: no evidence of an edge either way.`;
-    rec = "Run longer, or change the strategy before trading it.";
+    verdict = "FAIL";
+    msg = `Fails ${failed.length} of ${gates.length} acceptance gates (${failed.map(g => g.label).join("; ")}); ${ciText}.`;
+    rec = failed.length === 1 && failed[0].key === "history"
+      ? `Every other gate passes. A simulator run can't cover ${ACCEPTANCE.years} years; test on real historical bars before trading.`
+      : "Don't trade this configuration.";
   }
 
-  return { inSample: isR, outOfSample: oosR, verdict, verdictMessage: msg, degradation: degrad, recommendation: rec };
+  return {
+    inSample: isR, outOfSample: oosR, verdict, verdictMessage: msg, degradation: degrad, recommendation: rec,
+    acceptance: { passed, gates }, calibration: calibrationReport(oosCal),
+  };
 }
 
 // ─── Controls ─────────────────────────────────────────────────────────────────
@@ -1652,6 +1781,7 @@ function persistState() {
       totalSlippageCost: state.totalSlippageCost,
       roiPct: state.roiPct,
       wins, losses, totalWinAmt, totalLossAmt,
+      classRecords: Object.fromEntries(classRecords),
       pnlHistory: pnlHistory.slice(-200),
       dailyStartValue: dailyStart.value,
       dailyStartTick: dailyStart.tick,
@@ -1682,6 +1812,8 @@ function restoreState() {
     state.roiPct = s.roiPct ?? 0;
     wins = s.wins ?? 0; losses = s.losses ?? 0;
     totalWinAmt = s.totalWinAmt ?? 0; totalLossAmt = s.totalLossAmt ?? 0;
+    classRecords.clear();
+    for (const [mt, r] of Object.entries((s.classRecords ?? {}) as Record<string, EdgeRecord>)) classRecords.set(mt, { ...r });
     pnlHistory.length = 0; // replace, don't append — restoreState runs on every start
     if (s.pnlHistory) pnlHistory.push(...s.pnlHistory);
     state.circuitBreakerActive = s.circuitBreakerActive === true;
@@ -1846,6 +1978,14 @@ export function resetCircuitBreaker(opts?: { manual?: boolean }) {
     : "🔄 Circuit breaker reset");
 }
 
+/** How well the engine's win probabilities have matched its closed trades, overall and per market class. */
+export function liveCalibration(): CalibrationReport & { byClass: Record<string, CalibrationReport> } {
+  const rows = calibrationRows();
+  const byClass: Record<string, CalibrationReport> = {};
+  for (const mt of new Set(rows.map(r => r.marketType))) byClass[mt] = calibrationReport(rows.filter(r => r.marketType === mt));
+  return { ...calibrationReport(rows), byClass };
+}
+
 export function getAutoTraderState(): AutoTraderState {
   return { ...state, openPositions: [...state.openPositions] };
 }
@@ -1922,6 +2062,8 @@ export function resetAutoTraderState() {
 
   // Reset local accumulators
   wins = 0; losses = 0; totalWinAmt = 0; totalLossAmt = 0;
+  classRecords.clear();
+  clearCalibration();
   t1HitCount = 0; maxHoldCount = 0;
   sessionStartValue = STARTING_BALANCE;
   sessionPeak = STARTING_BALANCE;
