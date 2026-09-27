@@ -1,4 +1,4 @@
-import type { StockData, DailyCandle, AnalystAction, CatalystEvent, StockCategory, OptionsFlowRow } from "@shared/schema";
+import type { StockData, DailyCandle, StockCategory, OptionsFlowRow } from "@shared/schema";
 import { roundPrice } from "@shared/price";
 import { hashString } from "@shared/hash";
 
@@ -276,21 +276,6 @@ export const STOCK_INFO: Record<string, StockInfo> = {
   DXY:   { name: "US Dollar Index",    price: 104.2, volatility: 0.005, bias: 0.0001, category: "index", sector: "Currency Index", marketCapBillions: 0, floatMillions: 0, shortInterestBase: 0, institutionalOwnership: 0, beta: -0.3, marketType: "index", exchange: "ICE",   tradingHours: "24/5", pipSize: 0.001 },
 };
 
-const ANALYST_FIRMS = [
-  "Goldman Sachs", "Morgan Stanley", "JP Morgan", "Bank of America",
-  "Citigroup", "UBS", "Barclays", "Deutsche Bank", "Wells Fargo",
-  "Jefferies", "Piper Sandler", "Needham", "Wedbush", "Raymond James"
-];
-
-const CATALYST_TYPES = [
-  { type: "earnings", titles: ["Beat Q1 estimates by 15%", "Revenue guidance raised", "EPS miss on higher spending", "Record quarterly revenue"] },
-  { type: "partnership", titles: ["New strategic partnership announced", "Signed multi-year contract", "Government contract awarded", "Joint venture formed"] },
-  { type: "product", titles: ["New product launch", "FDA approval received", "Patent granted", "Major platform update released"] },
-  { type: "analyst", titles: ["Multiple analyst upgrades", "Added to institutional portfolio", "Price target raised 25%", "Downgrade on valuation concerns"] },
-  { type: "regulatory", titles: ["Regulatory approval secured", "Compliance milestone achieved", "New legislation favorable", "Investigation closed"] },
-  { type: "insider", titles: ["CEO purchased $2M shares", "Director increased stake", "CFO sold planned shares", "10b5-1 plan established"] },
-];
-
 function generateHistory(ticker: string, rand: () => number): DailyCandle[] {
   const info = STOCK_INFO[ticker];
   const candles: DailyCandle[] = [];
@@ -356,71 +341,6 @@ function generateHistory(ticker: string, rand: () => number): DailyCandle[] {
   return candles;
 }
 
-function generateAnalystActions(ticker: string, rand: () => number, bias: number): AnalystAction[] {
-  const info = STOCK_INFO[ticker];
-  const actions: AnalystAction[] = [];
-  const numActions = 3 + Math.floor(rand() * 4);
-
-  for (let i = 0; i < numActions; i++) {
-    const daysAgo = Math.floor(rand() * 30);
-    const date = new Date();
-    date.setDate(date.getDate() - daysAgo);
-    const firm = ANALYST_FIRMS[Math.floor(rand() * ANALYST_FIRMS.length)];
-
-    let rating: string;
-    let action: string;
-    const r = rand() * 100;
-    if (r < bias * 0.7) {
-      rating = "Overweight";
-      action = rand() > 0.5 ? "Upgrade" : "Reiterate";
-    } else if (r < bias) {
-      rating = "Buy";
-      action = "Initiate";
-    } else if (r < bias + 20) {
-      rating = "Equal Weight";
-      action = "Maintain";
-    } else {
-      rating = "Underweight";
-      action = rand() > 0.5 ? "Downgrade" : "Reiterate";
-    }
-
-    const pt = Math.round(info.price * (0.85 + rand() * 0.4));
-
-    actions.push({
-      date: date.toISOString().split("T")[0],
-      firm,
-      action,
-      rating,
-      priceTarget: pt,
-    });
-  }
-
-  return actions.sort((a, b) => b.date.localeCompare(a.date));
-}
-
-function generateCatalystTimeline(ticker: string, rand: () => number): CatalystEvent[] {
-  const events: CatalystEvent[] = [];
-  const numEvents = 2 + Math.floor(rand() * 4);
-
-  for (let i = 0; i < numEvents; i++) {
-    const daysAgo = Math.floor(rand() * 30);
-    const date = new Date();
-    date.setDate(date.getDate() - daysAgo);
-    const catType = CATALYST_TYPES[Math.floor(rand() * CATALYST_TYPES.length)];
-    const title = catType.titles[Math.floor(rand() * catType.titles.length)];
-    const impacts: ("positive" | "negative" | "neutral")[] = ["positive", "positive", "neutral", "negative"];
-    const impact = impacts[Math.floor(rand() * impacts.length)];
-
-    events.push({
-      date: date.toISOString().split("T")[0],
-      type: catType.type,
-      title,
-      impact,
-    });
-  }
-
-  return events.sort((a, b) => b.date.localeCompare(a.date));
-}
 
 function computeRSI(candles: DailyCandle[]): number {
   if (candles.length < 15) return 50;
@@ -512,32 +432,10 @@ export function generateAllStocks(): StockData[] {
 
     const bullBearRatio = Math.round((sentimentScore / Math.max(1, 100 - sentimentScore)) * 100) / 100;
 
-    const buyRatings = Math.round(analystScore * 0.14);
-    const sellRatings = Math.round((100 - analystScore) * 0.06);
-    const holdRatings = Math.max(0, 14 - buyRatings - sellRatings);
-
-    const analystActions = generateAnalystActions(ticker, rand, analystScore);
-    const catalystTimeline = generateCatalystTimeline(ticker, rand);
-
-    const bullText = signal === "BUY"
-      ? `Strong momentum with improving technical indicators. ${ticker} shows consistent buying pressure and institutional accumulation.`
-      : signal === "SELL"
-        ? `Some contrarian buyers see value at current levels. Watch for potential reversal signals near support.`
-        : `Moderate upside potential with stable fundamentals. Position sizing should reflect the mixed signal environment.`;
-
-    const bearText = signal === "SELL"
-      ? `Deteriorating technical picture with high-volume selloffs. Key support levels under threat with negative momentum divergence.`
-      : signal === "BUY"
-        ? `Overbought conditions may lead to near-term pullback. Risk/reward less favorable at current elevated levels.`
-        : `Limited catalysts in the near term. Sideways trading likely until next earnings or macro event provides direction.`;
 
     const fiftyTwoWeekHigh = Math.round(price * (1.15 + rand() * 0.35) * 100) / 100;
     const fiftyTwoWeekLow = Math.round(price * (0.45 + rand() * 0.25) * 100) / 100;
 
-    // Next earnings date
-    const earningsDate = new Date();
-    earningsDate.setDate(earningsDate.getDate() + 10 + Math.floor(rand() * 50));
-    const nextEarnings = earningsDate.toISOString().split("T")[0];
 
     stocks.push({
       ticker,
@@ -573,18 +471,13 @@ export function generateAllStocks(): StockData[] {
       compositeScore,
       signal,
       bullBearRatio,
-      analystRatings: { buy: buyRatings, hold: holdRatings, sell: sellRatings },
-      analystActions,
-      sentimentSummary: { bull: bullText, bear: bearText },
       marketCap: info.marketCapBillions * 1_000_000_000,
       beta: info.beta,
       fiftyTwoWeekHigh,
       fiftyTwoWeekLow,
       ma20,
       ma50,
-      nextEarnings,
       sector: info.sector,
-      catalystTimeline,
       // Multi-market fields
       marketType: (info.marketType ?? "stock") as StockData["marketType"],
       exchange: info.exchange ?? "NYSE",

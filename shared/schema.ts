@@ -89,9 +89,6 @@ export interface StockData {
   compositeScore: number;
   signal: "BUY" | "SELL" | "HOLD";
   bullBearRatio: number;
-  analystRatings: { buy: number; hold: number; sell: number };
-  analystActions: AnalystAction[];
-  sentimentSummary: { bull: string; bear: string };
   // Additional data for deep dive
   marketCap: number;
   beta: number;
@@ -99,9 +96,7 @@ export interface StockData {
   fiftyTwoWeekLow: number;
   ma20: number;
   ma50: number;
-  nextEarnings: string;
   sector: string;
-  catalystTimeline: CatalystEvent[];
   // Multi-market fields
   marketType: "stock" | "crypto" | "forex" | "commodity" | "index";
   exchange: string;      // e.g. NYSE, Binance, Forex, COMEX
@@ -123,20 +118,9 @@ export interface DailyCandle {
   bollingerLower?: number;
 }
 
-export interface AnalystAction {
-  date: string;
-  firm: string;
-  action: string;
-  rating: string;
-  priceTarget: number;
-}
-
-export interface CatalystEvent {
-  date: string;
-  type: string;
-  title: string;
-  impact: "positive" | "negative" | "neutral";
-}
+// Analyst actions, news "catalysts", ratings and earnings dates used to be
+// generated here with real firm names attached. The app has no source for
+// any of them, so they were removed rather than labelled.
 
 export interface PortfolioSummary {
   totalValue: number;
@@ -162,18 +146,45 @@ export interface Position {
   unrealizedPnlPercent: number;
 }
 
+/** GET /api/signals/:ticker — what the bot actually knows about one instrument. */
+export interface InstrumentDetail {
+  ticker: string;
+  name: string;
+  sector: string;
+  category: string;
+  marketType: string;
+  exchange: string | null;
+  price: number;
+  livePrice: boolean;
+  history: number[];              // the engine's evenly sampled prices, oldest first (~4 min)
+  indicators: {
+    rsi: number; pctB: number; emaFast: number; emaSlow: number;
+    macdHist: number | null; sigma: number; momZ: number | null;
+  } | null;                       // null until enough history to compute them
+  score: number | null;
+  grade: "A+" | "A" | "B" | "C" | null;
+  rank: number | null;
+  changePct: number | null;
+  reference: { marketCapBillions: number | null; beta: number | null }; // static reference values, not live
+}
+
+/** GET /api/signals: the auto-trader's live view of one instrument. */
 export interface SignalRow {
-  rank: number;
+  rank: number | null;            // position in the engine's ranking; null if not scored
   ticker: string;
   name: string;
   price: number;
-  dayChangePercent: number;
-  volumeVsAvg: number;
-  momentumScore: number;
-  sentimentScore: number;
-  compositeScore: number;
-  signal: "BUY" | "SELL" | "HOLD";
-  sparkline: number[];
+  livePrice: boolean;
+  changePct: number | null;       // change across the engine's sampled window (~4 min)
+  compositeScore: number | null;  // null while warming up or when a gate rejects it
+  grade: "A+" | "A" | "B" | "C" | null;
+  rsi: number | null;
+  signal: "BUY" | "HOLD";         // BUY = top five by rank, the pool the engine enters from
+  category: string;
+  marketType?: string;
+  exchange?: string;
+  tradingHours?: string;
+  sector: string;
 }
 
 // Scanner types
@@ -253,19 +264,19 @@ export interface MarketStatus {
   quotes: MarketQuote[];
 }
 
+/**
+ * Operator settings. The first three are Trade-dialog defaults; the alert
+ * switches gate the Telegram alerts in server/alerts.ts (buy = entries,
+ * sell = exits). Scanner toggles, a minimum score and "price alerts" used to
+ * be here too, but nothing ever read them.
+ */
 export interface UserSettings {
   maxPositionPct: number;
   stopLossPct: number;
   takeProfitPct: number;
-  scannerPennyActive: boolean;
-  scannerMomentumActive: boolean;
-  scannerSqueezeActive: boolean;
-  scannerOptionsActive: boolean;
-  minScoreThreshold: number;
   alertsEnabled: boolean;
   alertBuySignals: boolean;
   alertSellSignals: boolean;
-  alertPriceAlerts: boolean;
 }
 
 // ─── Grid Trading Bot ───────────────────────────────────────────────────────

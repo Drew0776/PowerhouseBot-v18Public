@@ -210,7 +210,7 @@ export default function Scanner() {
       {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-lg font-bold text-white tracking-tight">Scanner</h1>
-        <p className="text-[11px] text-zinc-500 mt-0.5">{universeCount} markets · 4 strategies · real-time signals</p>
+        <p className="text-[11px] text-zinc-500 mt-0.5">{universeCount} markets · 4 screens</p>
       </div>
 
       {/* Tabs — horizontally scrollable, no clip */}
@@ -232,14 +232,19 @@ export default function Scanner() {
               {tab.id === "squeeze"  && "🔥 "}
               {tab.id === "options"  && "📊 "}
               {tab.label}
-              {tab.id === "options" && (
-                <span className="ml-1.5 text-[8px] font-mono font-bold px-1 py-0.5 rounded bg-amber-400/15 text-amber-400/80 border border-amber-400/20 tracking-wide">
-                  SIM
-                </span>
-              )}
+              <span className="ml-1.5 text-[8px] font-mono font-bold px-1 py-0.5 rounded bg-amber-400/15 text-amber-400/80 border border-amber-400/20 tracking-wide">
+                SAMPLE
+              </span>
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Every screen here scores sample data generated when the server starts;
+          only the price column can be live. Said once for all tabs, because
+          every tab but Options Flow used to look like market data. */}
+      <div className="mx-4 mb-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300/90" data-testid="scanner-sample-note">
+        <b>Sample data.</b> Short interest, float, volume spikes, catalysts, RSI/MACD, analyst figures and options flow on this page are generated when the server starts, not read from a market feed. Only prices can be live. The auto-trader doesn't use these screens; its real scores are on the Dashboard and Auto-Trader pages.
       </div>
 
       {/* Feed health banner — only renders when reconnecting or stale */}

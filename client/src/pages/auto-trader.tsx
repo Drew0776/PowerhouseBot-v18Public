@@ -161,10 +161,8 @@ interface EquityCurvePoint {
 
 interface SignalItem {
   ticker: string;
-  signal: string;
-  compositeScore: number;
-  momentumScore: number;
-  sentimentScore: number;
+  signal: string;          // engine grade, "" when unranked
+  compositeScore: number | null;
   marketType: string;
   category: string;
   price: number;
@@ -901,7 +899,10 @@ function MarketHeatmapStrip() {
     queryKey: ["/api/signals"],
     queryFn: async () => {
       const r = await apiRequest("GET", "/api/signals");
-      return r.json();
+      // Tiles are coloured by the engine's grade (A+/A/B); /api/signals'
+      // `signal` is BUY/HOLD, which matched no colour.
+      const rows = (await r.json()) as Array<{ grade: string | null } & Omit<SignalItem, "signal">>;
+      return rows.map(({ grade, ...rest }) => ({ ...rest, signal: grade ?? "" }));
     },
     refetchInterval: 8000,
   });

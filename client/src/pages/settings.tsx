@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { Shield, Crosshair, Bell, Activity, Wifi, WifiOff } from "lucide-react";
+import { Shield, Bell, Activity, Wifi, WifiOff } from "lucide-react";
 
 interface AlpacaStatus {
   connected: boolean;
@@ -81,8 +81,11 @@ export default function Settings() {
       <div className="rounded-lg border border-border p-5" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
         <div className="flex items-center gap-2 mb-4">
           <Shield className="w-4 h-4 text-[#00bcd4]" />
-          <h2 className="text-sm font-semibold text-foreground">Risk Management</h2>
+          <h2 className="text-sm font-semibold text-foreground">Manual trades</h2>
         </div>
+        <p className="text-[11px] text-muted-foreground -mt-2 mb-4">
+          Defaults for the Trade dialog. The auto-trader sets its own stops and sizes from each instrument's volatility and its risk limit.
+        </p>
         <div className="space-y-5">
           <div>
             <Label className="text-xs text-muted-foreground">Max Position Size</Label>
@@ -97,7 +100,7 @@ export default function Settings() {
               />
               <span className="text-sm font-mono tabular-nums w-10 text-right">{local.maxPositionPct}%</span>
             </div>
-            <p className="text-[10px] text-muted-foreground mt-1">Warn if single position exceeds this % of portfolio</p>
+            <p className="text-[10px] text-muted-foreground mt-1">The Trade dialog warns when an order is larger than this share of the portfolio</p>
           </div>
           <div>
             <Label className="text-xs text-muted-foreground">Default Stop-Loss</Label>
@@ -125,46 +128,6 @@ export default function Settings() {
                 className="flex-1"
               />
               <span className="text-sm font-mono tabular-nums w-10 text-right">{local.takeProfitPct}%</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Scanner Preferences */}
-      <div className="rounded-lg border border-border p-5" style={{ backgroundColor: "hsl(220 18% 7%)" }}>
-        <div className="flex items-center gap-2 mb-4">
-          <Crosshair className="w-4 h-4 text-[#00bcd4]" />
-          <h2 className="text-sm font-semibold text-foreground">Scanner Preferences</h2>
-        </div>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">100x Hunter (Penny Stocks)</Label>
-            <Switch checked={local.scannerPennyActive} onCheckedChange={v => update("scannerPennyActive", v)} />
-          </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">Momentum Breakouts</Label>
-            <Switch checked={local.scannerMomentumActive} onCheckedChange={v => update("scannerMomentumActive", v)} />
-          </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">Short Squeeze Radar</Label>
-            <Switch checked={local.scannerSqueezeActive} onCheckedChange={v => update("scannerSqueezeActive", v)} />
-          </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">Options Flow</Label>
-            <Switch checked={local.scannerOptionsActive} onCheckedChange={v => update("scannerOptionsActive", v)} />
-          </div>
-          <div className="pt-2 border-t border-border">
-            <Label className="text-xs text-muted-foreground">Minimum Score Threshold</Label>
-            <div className="flex items-center gap-3 mt-1.5">
-              <Slider
-                value={[local.minScoreThreshold]}
-                onValueChange={([v]) => update("minScoreThreshold", v)}
-                min={0}
-                max={80}
-                step={5}
-                className="flex-1"
-              />
-              <span className="text-sm font-mono tabular-nums w-10 text-right">{local.minScoreThreshold}</span>
             </div>
           </div>
         </div>
@@ -237,17 +200,14 @@ export default function Settings() {
             <Switch checked={local.alertsEnabled} onCheckedChange={v => update("alertsEnabled", v)} />
           </div>
           <div className="flex items-center justify-between">
-            <Label className="text-xs">Buy Signal Alerts</Label>
+            <Label className="text-xs">Entry alerts <span className="text-muted-foreground">· the auto-trader opened a position</span></Label>
             <Switch checked={local.alertBuySignals} onCheckedChange={v => update("alertBuySignals", v)} disabled={!local.alertsEnabled} />
           </div>
           <div className="flex items-center justify-between">
-            <Label className="text-xs">Sell Signal Alerts</Label>
+            <Label className="text-xs">Exit alerts <span className="text-muted-foreground">· it closed one, with the result</span></Label>
             <Switch checked={local.alertSellSignals} onCheckedChange={v => update("alertSellSignals", v)} disabled={!local.alertsEnabled} />
           </div>
-          <div className="flex items-center justify-between">
-            <Label className="text-xs">Price Alerts</Label>
-            <Switch checked={local.alertPriceAlerts} onCheckedChange={v => update("alertPriceAlerts", v)} disabled={!local.alertsEnabled} />
-          </div>
+          <p className="text-[10px] text-muted-foreground">Circuit-breaker trips and the daily summary are sent whenever alerts are on. Alerts go to Telegram, set up below.</p>
         </div>
       </div>
 
@@ -257,7 +217,7 @@ export default function Settings() {
           <Bell className="w-4 h-4 text-[#00bcd4]" />
           <h2 className="text-sm font-semibold text-foreground">Telegram Alerts</h2>
         </div>
-        <p className="text-xs text-muted-foreground mb-4">Get real-time alerts for signals and circuit breaker events on your phone.</p>
+        <p className="text-xs text-muted-foreground mb-4">Alerts for the auto-trader's entries and exits, circuit-breaker trips, and a daily P&amp;L summary.</p>
         <div className="space-y-3 text-xs text-zinc-400">
           <div className="bg-zinc-800/60 rounded p-3 space-y-2">
             <p className="font-semibold text-white">3-Step Setup:</p>
