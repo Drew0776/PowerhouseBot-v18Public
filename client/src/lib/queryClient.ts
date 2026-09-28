@@ -12,7 +12,13 @@ async function throwIfResNotOk(res: Response) {
       window.location.hash = "/login";
     }
     const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
+    // API errors are { message }: show that sentence rather than raw JSON.
+    let message = text;
+    try {
+      const body = JSON.parse(text) as { message?: unknown };
+      if (typeof body.message === "string" && body.message) message = body.message;
+    } catch { /* not JSON */ }
+    throw new Error(message === text ? `${res.status}: ${text}` : message);
   }
 }
 
