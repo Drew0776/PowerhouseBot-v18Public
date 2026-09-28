@@ -1,5 +1,8 @@
 FROM node:20-alpine
 
+# su-exec drops from root to the node user in docker-entrypoint.sh
+RUN apk add --no-cache su-exec
+
 WORKDIR /app
 
 # Copy package files
@@ -29,9 +32,11 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Mount something at /data: `docker run -v powerhouse-data:/data ...`, or a
 # Railway volume with mount path /data.
 ENV DATA_DB_PATH=/data/data.db
-RUN mkdir -p /data
+RUN mkdir -p /data && chown node:node /data
 VOLUME ["/data"]
 
-# Start
+# Start as the unprivileged node user (see docker-entrypoint.sh)
 ENV NODE_ENV=production
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/index.cjs"]
