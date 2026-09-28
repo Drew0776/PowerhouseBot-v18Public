@@ -10,3 +10,8 @@ vite.config.ts.*
 # Keep example
 data.db-shm
 data.db-wal
+
+# Secrets: copy .env.example to .env locally; never commit the real file
+.env
+.env.*
+!.env.example

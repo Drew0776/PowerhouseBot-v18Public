@@ -41,6 +41,7 @@ import {
   instrumentDetail,
   liveCalibration,
   manualFill,
+  buyQuote,
 } from "./auto-trader";
 
 import { sendTelegramAlert } from "./alerts";
@@ -435,6 +436,16 @@ export async function registerRoutes(
     price: z.number().positive().optional(),
     stopLoss: z.number().positive().optional(),
     takeProfit: z.number().positive().optional(),
+  });
+
+  // GET /api/trades/quote?ticker=X — per-share buy price for a manual trade,
+  // spread included, or why it can't trade now (409: market closed / stale).
+  app.get("/api/trades/quote", requireAuth, (req, res) => {
+    const ticker = String(req.query.ticker ?? "").toUpperCase();
+    if (!/^[A-Z0-9.\-]{1,16}$/.test(ticker)) return res.status(400).json({ message: "invalid ticker" });
+    const q = buyQuote(ticker);
+    if ("error" in q) return res.status(q.status).json({ message: q.error });
+    res.json({ ticker, price: q.price });
   });
 
   app.post("/api/trades", requireAuth, (req, res) => {

@@ -33,6 +33,7 @@ globalThis.fetch = (async () => new Response(JSON.stringify({
 }), { status: 200 })) as typeof fetch;
 
 const alpaca = await import("../alpaca.js");
+const { roundPrice } = await import("../../shared/price.js");
 const st = await import("../storage.js");
 const at = await import("../auto-trader.js");
 const grid = await import("../grid-engine.js");
@@ -112,4 +113,30 @@ test("manual trades in simulated instruments pay the modelled spread", () => {
   assert.ok(f.cost > 0);
   const missing = at.manualFill("NOPE", "buy", 1, OPEN);
   assert.ok("error" in missing && missing.status === 404);
+});
+
+test("the buy quote includes the spread, so a Max order fits the cash", async () => {
+  await alpaca.refreshAllPrices();
+  assert.deepEqual(at.buyQuote("NVDA", OPEN), { price: 250.2 }, "live: the ask");
+  const closed = at.buyQuote("NVDA", CLOSED);
+  assert.ok("error" in closed && closed.status === 409);
+
+  // Simulated: mark plus the modelled half-spread. Size a Max order the way
+  // the trade dialog does and check the server's fill fits the cash.
+  const cash = 499.71;
+  // Every class the simulator prices: crypto, forex, commodity, index.
+  for (const t of ["SOL", "BTC", "EURUSD", "NATGAS", "DJI"]) {
+    const s = st.getStockByTicker(t);
+    assert.ok(s, `${t} is in the universe`);
+    const q = at.buyQuote(t, OPEN);
+    assert.ok(!("error" in q));
+    assert.ok(q.price > s.price, `${t}: quote above the mark`);
+    const shares = Math.floor((cash / (q.price * 1.0001)) * 10000) / 10000;
+    if (shares <= 0) continue; // e.g. one BTC costs more than the cash
+    const f = at.manualFill(t, "buy", shares, OPEN);
+    assert.ok(!("error" in f));
+    const execPrice = roundPrice(f.price + f.cost / shares); // as POST /api/trades does
+    const total = Math.round(shares * execPrice * 100) / 100;
+    assert.ok(total <= cash, `${t}: $${total} fits $${cash}`);
+  }
 });
