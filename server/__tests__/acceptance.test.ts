@@ -122,8 +122,8 @@ test("entries need a quote fresher than ENTRY_MAX_QUOTE_AGE_MS during the sessio
   assert.equal(at.entryBlockReason(t, open), null);
 
   // Simulated instruments have no quote to go stale.
-  assert.equal(at.entryBlockReason("BTC-USD", open), null);
-  assert.equal(at.holdsOnStaleQuote("BTC-USD"), false);
+  assert.equal(at.entryBlockReason("BTC", open), null);
+  assert.equal(at.holdsOnStaleQuote("BTC"), false);
 });
 
 test("a live position whose quote has gone stale holds", () => {
@@ -202,8 +202,8 @@ test("Brier score and reliability table", () => {
 
 test("closed trades are logged with their win probability and scored per class", () => {
   clearCalibration();
-  recordCalibration({ tradeId: 1, ticker: "BTC-USD", marketType: "crypto", p: 0.6, won: true, reason: "full_target" });
-  recordCalibration({ tradeId: 2, ticker: "BTC-USD", marketType: "crypto", p: 0.6, won: false, reason: "stopped_out" });
+  recordCalibration({ tradeId: 1, ticker: "BTC", marketType: "crypto", p: 0.6, won: true, reason: "full_target" });
+  recordCalibration({ tradeId: 2, ticker: "BTC", marketType: "crypto", p: 0.6, won: false, reason: "stopped_out" });
   recordCalibration({ tradeId: 3, ticker: "EUR/USD", marketType: "forex", p: 0.4, won: false, reason: "max_hold" });
   const c = at.liveCalibration();
   assert.equal(c.n, 3);

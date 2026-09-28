@@ -40,6 +40,7 @@ import {
   liveSignalView,
   instrumentDetail,
   liveCalibration,
+  manualFill,
 } from "./auto-trader";
 
 import { sendTelegramAlert } from "./alerts";
@@ -49,6 +50,7 @@ import { sendTelegramAlert } from "./alerts";
 // Alpaca feed
 import { getAlpacaStatus, getAlpacaAccount, getAlpacaPrice, ALPACA_STOCK_TICKERS, refreshAllPrices, startAlpacaFeed } from "./alpaca";
 import { z } from "zod";
+import { roundPrice } from "@shared/price";
 
 // Deterministic random for market status & options flow
 function seededRandom(seed: number) {
@@ -451,16 +453,11 @@ export async function registerRoutes(
       const { ticker, action, shares, stopLoss, takeProfit } = parsed.data;
       const upperTicker = ticker.toUpperCase();
 
-      // Validate the ticker is one the server actually tracks, and use the
-      // server-side market price as the execution price.
-      const stock = getStockByTicker(upperTicker);
-      if (!stock) {
-        return res.status(404).json({ message: "Unknown ticker" });
-      }
-      const execPrice = stock.price;
-      if (!(execPrice > 0)) {
-        return res.status(503).json({ message: "Market price unavailable" });
-      }
+      // The server sets the price: the live ask, or the simulated mark plus
+      // the modelled half-spread, on the same terms the engine trades.
+      const fill = manualFill(upperTicker, "buy", shares);
+      if ("error" in fill) return res.status(fill.status).json({ message: fill.error });
+      const execPrice = roundPrice(fill.price + fill.cost / shares);
 
       const total = Math.round(shares * execPrice * 100) / 100;
 
@@ -504,12 +501,15 @@ export async function registerRoutes(
         return res.status(409).json({ message: "This trade holds a grid bot's capital. Stop the grid bot instead." });
       }
 
-      const stock = getStockByTicker(trade.ticker);
-      if (!stock) {
-        return res.status(404).json({ message: "Stock not found" });
+      if (trade.status === "closed") {
+        return res.status(400).json({ message: "Trade already closed" });
       }
+      // Sells at the live bid, or the simulated mark less the modelled
+      // half-spread; refused while a live stock has no fresh quote.
+      const fill = manualFill(trade.ticker, "sell", trade.shares);
+      if ("error" in fill) return res.status(fill.status).json({ message: fill.error });
 
-      const closedTrade = storage.closeTrade(id, stock.price);
+      const closedTrade = storage.closeTrade(id, fill.price, fill.cost);
       if (!closedTrade) {
         return res.status(400).json({ message: "Trade already closed" });
       }
