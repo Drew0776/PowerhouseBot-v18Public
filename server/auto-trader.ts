@@ -284,6 +284,19 @@ export function manualFill(
   return { price: stock.price, cost: modelledCost(shares, stock.price, mt) };
 }
 
+/**
+ * What one share would cost to buy manually right now, spread included: the
+ * live ask, or the simulated mark plus the modelled half-spread. The trade
+ * dialog sizes dollar amounts from it, so "Max" fits the cash available.
+ */
+export function buyQuote(ticker: string, etClock: Date = etNow()): { price: number } | { error: string; status: number } {
+  // Costs are proportional to notional; price a large lot so the 4-decimal
+  // rounding of modelledCost can't distort the per-share figure.
+  const LOT = 1_000_000;
+  const f = manualFill(ticker, "buy", LOT, etClock);
+  return "error" in f ? f : { price: f.price + f.cost / LOT };
+}
+
 // ─── Slippage ─────────────────────────────────────────────────────────────────
 
 // Execution cost per side as a fraction of notional — roughly half the

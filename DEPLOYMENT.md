@@ -115,6 +115,17 @@ an empty database and loses all trades, grid bots and engine state:
 - Docker: `docker run -v powerhouse-data:/data -p 5000:5000 -e OPERATOR_PASSWORD=... powerhouse`
 - Railway: add a Volume to the service with mount path `/data`.
 
+The server runs as the unprivileged `node` user: `docker-entrypoint.sh`
+starts as root only to hand `/data` to that user (mounted volumes are
+usually root-owned), and falls back to root with a warning if it can't.
+`.dockerignore` keeps local `node_modules`, `dist`, databases and `.env`
+files out of the image, so a local `docker build` behaves like Railway's
+clean build.
+
+Secrets go in the host's environment settings, never in the repository.
+For local runs, copy `.env.example` to `.env` and export it (`set -a;
+. ./.env; set +a`); `.env` is gitignored.
+
 On Replit the database stays in the project directory, which persists
 across redeploys, so nothing changes there.
 

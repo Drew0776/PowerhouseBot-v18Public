@@ -39,14 +39,30 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
     queryKey: ["/api/settings"],
   });
 
-  const cash = portfolio?.cash ?? 100;
-  const totalValue = portfolio?.totalValue ?? 100;
+  // The server's buy price for one share, spread included (the live ask, or
+  // the simulated mark plus the modelled half-spread), or why it can't trade
+  // now. Sizing from the bare mark made "Max" cost more than the cash.
+  const { data: quote, error: quoteError } = useQuery<{ price: number }>({
+    queryKey: [`/api/trades/quote?ticker=${encodeURIComponent(ticker)}`],
+    enabled: open,
+    refetchInterval: open ? 5000 : false,
+    retry: false,
+  });
+  const buyPrice = quote?.price ?? price;
 
+  // Nothing is sized until the portfolio has loaded (it used to assume $100).
+  const cash = portfolio?.cash ?? 0;
+  const totalValue = portfolio?.totalValue ?? 0;
+
+  // Shares go to the server at 4 decimals; round down so the total never
+  // exceeds the amount entered. The 0.01% margin covers the server rounding
+  // its fill price.
+  const floor4 = (v: number) => Math.floor(v * 10000) / 10000;
   const shares = mode === "dollars"
-    ? (parseFloat(amount) || 0) / price
-    : parseFloat(amount) || 0;
+    ? floor4((parseFloat(amount) || 0) / (buyPrice * 1.0001))
+    : floor4(parseFloat(amount) || 0);
 
-  const total = shares * price;
+  const total = shares * buyPrice;
   const positionPct = totalValue > 0 ? (total / totalValue) * 100 : 0;
   const maxPosPct = settings?.maxPositionPct ?? 20;
   const oversized = positionPct > maxPosPct;
@@ -56,8 +72,7 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
       const body: any = {
         ticker,
         action: "buy",
-        shares: Math.round(shares * 10000) / 10000,
-        price,
+        shares,
       };
       if (stopLoss) body.stopLoss = parseFloat(stopLoss);
       if (takeProfit) body.takeProfit = parseFloat(takeProfit);
@@ -65,13 +80,13 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
       const res = await apiRequest("POST", "/api/trades", body);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (trade: { shares: number; price: number; total: number }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["/api/trades"] });
       queryClient.invalidateQueries({ queryKey: ["/api/equity-curve"] });
       toast({
         title: "Trade Executed",
-        description: `Bought ${shares.toFixed(4)} shares of ${ticker} at $${formatPrice(price)}`,
+        description: `Bought ${trade.shares.toFixed(4)} shares of ${ticker} at $${formatPrice(trade.price)} ($${trade.total.toFixed(2)} incl. spread)`,
       });
       setAmount("");
       setStopLoss("");
@@ -107,9 +122,10 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
             <span className="text-[#00bcd4] font-mono">{ticker}</span>
           </DialogTitle>
           <DialogDescription>
-            Current price: <span className="font-mono tabular-nums text-foreground">${formatPrice(price)}</span>
+            Buy price: <span className="font-mono tabular-nums text-foreground">${formatPrice(buyPrice)}</span>
+            <span className="text-muted-foreground"> incl. spread</span>
             {" · "}
-            Available: <span className="font-mono tabular-nums text-foreground">${cash.toFixed(2)}</span>
+            Available: <span className="font-mono tabular-nums text-foreground">{portfolio ? `$${cash.toFixed(2)}` : "…"}</span>
           </DialogDescription>
         </DialogHeader>
 
@@ -243,10 +259,14 @@ export default function TradeDialog({ open, onOpenChange, ticker, price }: Trade
             </div>
           </div>
 
+          {quoteError && (
+            <p className="text-[11px] text-[#ffd740]" data-testid="trade-unavailable">{(quoteError as Error).message}</p>
+          )}
+
           {/* Execute */}
           <Button
             className="w-full"
-            disabled={shares <= 0 || total > cash || mutation.isPending}
+            disabled={!portfolio || !quote || !!quoteError || shares <= 0 || total > cash || mutation.isPending}
             onClick={() => mutation.mutate()}
             data-testid="execute-trade-btn"
           >
