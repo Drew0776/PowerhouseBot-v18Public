@@ -14,7 +14,7 @@ import { eq, desc } from "drizzle-orm";
 import { gridBots, gridOrders, gridEvents } from "@shared/schema";
 import type { GridBot, GridOrder, GridBotSummary, GridLevel, GridEvent } from "@shared/schema";
 // V17 BUG FIX #4: Share single DB connection from storage.ts — no more lock contention
-import { storage, getStockByTicker, advanceGridPrice, getGridPrice, isLiveGridPrice, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
+import { storage, getStockByTicker, advanceGridPrice, getGridPrice, isLiveGridPrice, isGridPriceHeld, setGridReserveValuer, db as gridDb, sqlite } from "./storage";
 import { isGridBreakerActive, modelledCost } from "./auto-trader";
 import { roundPrice } from "@shared/price";
 
@@ -640,6 +640,9 @@ export function tickGridBot(botId: number): GridOrder | null {
   // market and parked in `paused_by_breaker`; the boot-time watcher (see
   // bootGridEngine) auto-resumes these bots once drawdown recovers.
   if (isGridBreakerActive()) {
+    // A live ticker with a stale quote waits for a fresh one: flattening at
+    // the last price seen would book fills the market may not give.
+    if (isGridPriceHeld(bot.ticker)) return null;
     const livePrice = getGridPrice(bot.ticker);
     const marketPrice = livePrice > 0 ? livePrice : (bot.lowerPrice + bot.upperPrice) / 2;
     closeAllOpenPositions(bot, marketPrice);
@@ -651,7 +654,8 @@ export function tickGridBot(botId: number): GridOrder | null {
     return null;
   }
 
-  // Advance price simulation — GBM + mean-reversion step
+  // Next price: the live quote, or a simulated step. 0 means hold — a live
+  // ticker whose quote is stale (see isGridPriceHeld).
   const currentPrice = advanceGridPrice(bot.ticker);
   if (!currentPrice) return null;
 

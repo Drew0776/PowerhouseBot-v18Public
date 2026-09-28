@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { eq, desc } from "drizzle-orm";
 import { generateAllStocks } from "./seed";
-import { getAlpacaPrice, ALPACA_STOCK_TICKERS } from "./alpaca";
+import { getAlpacaPrice, ALPACA_STOCK_TICKERS, isAlpacaConfigured, setAlpacaPriceCallback } from "./alpaca";
 
 const DB_PATH = process.env.DATA_DB_PATH ?? "data.db";
 fs.mkdirSync(path.dirname(path.resolve(DB_PATH)), { recursive: true }); // e.g. a fresh /data volume
@@ -107,6 +107,16 @@ for (const s of stockDataCache) {
 export function getStockData() {
   return stockDataCache;
 }
+
+// Every live Alpaca quote or trade updates the shared price, so portfolio
+// values, manual trades and signals follow the market whether or not the
+// auto-trader is running. (The callback was never registered: live prices
+// only reached this cache from the auto-trader's own tick, so with the
+// engine stopped every screen priced live stocks at their startup values.)
+setAlpacaPriceCallback((ticker, price) => {
+  const i = stockDataCache.findIndex(s => s.ticker === ticker);
+  if (i >= 0 && price > 0) stockDataCache[i] = { ...stockDataCache[i], price };
+});
 
 export function getStockByTicker(ticker: string) {
   return stockDataCache.find((s) => s.ticker === ticker);
@@ -507,11 +517,23 @@ if (storage.getEquityCurve().length === 0) {
 // made the two simulators overwrite each other's prices.
 
 const gridSim = new Map<string, { price: number; lcg: number }>();
+const lastLiveGridPrice = new Map<string, number>();
 
 function liveGridPrice(ticker: string): number | null {
   if (!ALPACA_STOCK_TICKERS.has(ticker)) return null;
   const p = getAlpacaPrice(ticker);
-  return p != null && p > 0 ? p : null;
+  if (p != null && p > 0) { lastLiveGridPrice.set(ticker, p); return p; }
+  return null;
+}
+
+/**
+ * A live-priced ticker (Alpaca keys set) without a fresh quote: after hours,
+ * or while the feed is down. Grid bots hold on it instead of switching to the
+ * simulator, which walks from the startup price and could fill, or trip a
+ * range-exit stop, at prices the market never traded.
+ */
+export function isGridPriceHeld(ticker: string): boolean {
+  return isAlpacaConfigured() && ALPACA_STOCK_TICKERS.has(ticker) && liveGridPrice(ticker) == null;
 }
 
 /** True when the grid price for a ticker is a live Alpaca quote. */
@@ -523,6 +545,7 @@ export function isLiveGridPrice(ticker: string): boolean {
 export function advanceGridPrice(ticker: string): number {
   const live = liveGridPrice(ticker);
   if (live != null) return live;
+  if (isGridPriceHeld(ticker)) return 0; // hold: no fresh live quote
 
   const stock = stockDataCache.find(s => s.ticker === ticker);
   if (!stock) return 0;
@@ -542,8 +565,13 @@ export function advanceGridPrice(ticker: string): number {
 
 /** Current grid price without advancing (live quote, else last simulated, else seed). */
 export function getGridPrice(ticker: string): number {
-  return liveGridPrice(ticker)
-    ?? gridSim.get(ticker)?.price
+  const live = liveGridPrice(ticker);
+  if (live != null) return live;
+  // A live ticker is valued at its last live price, never a simulated one.
+  if (isAlpacaConfigured() && ALPACA_STOCK_TICKERS.has(ticker)) {
+    return lastLiveGridPrice.get(ticker) ?? stockDataCache.find(s => s.ticker === ticker)?.price ?? 0;
+  }
+  return gridSim.get(ticker)?.price
     ?? _ORIGINAL_PRICES_FROZEN.get(ticker)
     ?? 0;
 }

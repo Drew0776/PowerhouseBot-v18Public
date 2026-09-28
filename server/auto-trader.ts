@@ -196,7 +196,9 @@ const MAX_HOLD_T1    = 200;  // V10: 200 ticks after T1
 const COOLDOWN       = 2;    // V14: 2-tick cooldown — max frequency target 14+/100t
 
 // Risk
-const DAILY_DD_LIMIT = 0.08;  // 8% circuit breaker
+// Daily-loss circuit breaker, tiered by the day's starting value (see
+// drawdownStatus): 3% from $500, 5% from $200, this 8% below that.
+const DAILY_DD_LIMIT = 0.08;
 const KELLY_CAP      = 0.08;   // 8% max account risk per trade
 const PROBE_RISK     = 0.0025; // 0.25% risk while there is no measured edge
 const BACKTEST_MIN_TRADES = 30; // out-of-sample trades needed for a verdict
@@ -253,6 +255,33 @@ export function entryBlockReason(ticker: string, etClock: Date = etNow()): strin
   if (!q) return "no_live_quote";
   if (q.freshMs > ENTRY_MAX_QUOTE_AGE_MS) return "stale_quote";
   return null;
+}
+
+/**
+ * Fill for a manual trade from the Trade Log or a trade dialog, on the same
+ * terms the engine gets. Live stocks need the market open and a fresh quote
+ * (the entry rule above) and fill at the ask (buy) or bid (sell), which
+ * already include the spread. Simulated instruments fill at the mark and pay
+ * the modelled half-spread in `cost`. Manual trades used to fill at the mid,
+ * free, at any hour — even on a stale or startup price.
+ */
+export function manualFill(
+  ticker: string, side: "buy" | "sell", shares: number, etClock: Date = etNow(),
+): { price: number; cost: number } | { error: string; status: number } {
+  const stock = getStockByTicker(ticker);
+  if (!stock) return { error: "Unknown ticker", status: 404 };
+  if (isLiveStock(ticker)) {
+    const blocked = entryBlockReason(ticker, etClock);
+    if (blocked === "market_closed") return { error: "The US market is closed. Live stocks trade 9:30–16:00 ET on exchange days.", status: 409 };
+    if (blocked) return { error: `No fresh live quote for ${ticker} right now. Try again in a few seconds.`, status: 409 };
+    const q = getAlpacaQuote(ticker)!;
+    const price = side === "buy" ? q.ask : q.bid;
+    if (!(price > 0)) return { error: `No live ${side === "buy" ? "ask" : "bid"} for ${ticker} right now.`, status: 409 };
+    return { price, cost: 0 };
+  }
+  if (!(stock.price > 0)) return { error: "Market price unavailable", status: 503 };
+  const mt = (stock as { marketType?: string }).marketType ?? "stock";
+  return { price: stock.price, cost: modelledCost(shares, stock.price, mt) };
 }
 
 // ─── Slippage ─────────────────────────────────────────────────────────────────
